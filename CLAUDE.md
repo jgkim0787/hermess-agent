@@ -14,3 +14,4 @@
 | 날짜 | 변경 내용 | 대상 | 사유 |
 |------|----------|------|------|
 | 2026-06-17 | 초기 구성(에이전트 6 · 스킬 8 · 사이트 셸 · Module 0 worked example) | 전체 | - |
+| 2026-06-18 | GitHub Pages 배포 (public, main /docs → https://jgkim0787.github.io/hermess-agent/) | docs/ | 인터넷 접근 |

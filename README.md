@@ -5,6 +5,8 @@
 학습 자료는 HTML 사이트(`docs/`, GitHub Pages)로 제공된다. 학습 중 질문은 자동 기록되고, 복습(리마인드) 자료를 생성할 수 있다.
 
 > 스택: Python + Anthropic Claude API · 언어: 한글(전문 용어는 영어)
+>
+> 🌐 **라이브 사이트:** https://jgkim0787.github.io/hermess-agent/ — 언제 어디서든 학습
 
 ## 무엇이 들어있나
 
@@ -34,8 +36,9 @@
 
 ## 인터넷에 올리기 (GitHub Pages)
 
-`.claude/skills/learning-harness/references/deploy-github-pages.md` 참고. 요지:
-저장소 푸시 → Settings → Pages → Source: `main` `/docs` → `https://<owner>.github.io/hermess-agent/`.
+이미 배포되어 있습니다 → **https://jgkim0787.github.io/hermess-agent/** (source: `main` `/docs`).
+이후 갱신은 커밋·푸시만 하면 1~2분 뒤 반영됩니다. 절차 상세는
+`.claude/skills/learning-harness/references/deploy-github-pages.md` 참고.
 
 ---
 🤖 학습 하네스로 생성·관리됩니다. 자세한 운영은 `CLAUDE.md` 참고.
