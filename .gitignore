@@ -1,0 +1,14 @@
+# 비밀/환경
+.env
+clone-project/.env
+
+# 파이썬
+__pycache__/
+*.pyc
+.venv/
+clone-project/logs/
+
+# OS/에디터
+.DS_Store
+.idea/
+.vscode/

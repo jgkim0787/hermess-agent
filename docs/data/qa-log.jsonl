@@ -1,0 +1,1 @@
+{"ts":"2026-06-17","module":"00-what-is-an-agent","question":"LLM이랑 Agent랑 정확히 뭐가 다른 거야?","answer_summary":"LLM은 텍스트 in → 텍스트 out 하는 stateless 함수로, 한 번 답하면 끝이다. Agent는 그 LLM을 loop로 감싸고 tools(도구)와 goal(목표)을 붙여, '판단→행동→관찰'을 목표 달성까지 반복한다. 즉 LLM은 부품(두뇌)이고 Agent는 그 두뇌에 손발과 반복 루프를 단 시스템이다.","tags":["LLM","agent","agent loop"],"concepts":["00-what-is-an-agent"]}

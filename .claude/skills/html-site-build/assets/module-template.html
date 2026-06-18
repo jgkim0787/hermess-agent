@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ORDER}}. {{TITLE}} — Hermes 과정</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body data-page="module" data-slug="{{SLUG}}">
+  <header class="site-header">
+    <a class="brand" href="../index.html">🛰️ Hermes 과정</a>
+    <button id="navToggle" class="nav-toggle" aria-label="목차 열기">☰</button>
+    <span class="crumb">{{ORDER}}. {{TITLE}}</span>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" id="sidebar"><!-- app.js 가 curriculum.json 으로 채움 --></aside>
+
+    <main class="content">
+      <article class="module">
+        <p class="eyebrow">모듈 {{ORDER}}</p>
+        <h1>{{TITLE}}</h1>
+
+        {{CONCEPT}}
+
+        {{PRACTICE}}
+
+        {{CLONE}}
+
+        <section class="module-section" id="questions">
+          <h2>이번 모듈 질문</h2>
+          <div id="moduleQa" class="qa-list"><p class="hint">학습 중 궁금한 점을 물어보면 여기에 기록됩니다.</p></div>
+        </section>
+
+        <nav class="module-nav">
+          <a class="prev" href="{{PREV_HREF}}">← {{PREV_TITLE}}</a>
+          <a class="next" href="{{NEXT_HREF}}">{{NEXT_TITLE}} →</a>
+        </nav>
+      </article>
+    </main>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../assets/app.js"></script>
+</body>
+</html>
