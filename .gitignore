@@ -8,6 +8,9 @@ __pycache__/
 .venv/
 clone-project/logs/
 
+# 하네스 중간 빌드 산출물 (감사/재실행용 로컬 보존, 추적 제외)
+_workspace/
+
 # OS/에디터
 .DS_Store
 .idea/

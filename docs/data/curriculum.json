@@ -20,7 +20,7 @@
       "title": "LLM 다루기",
       "summary": "token, message 구조, system prompt, max_tokens, stop_reason, stateless, streaming",
       "flavor": "공통",
-      "status": "planned",
+      "status": "done",
       "terms": ["token", "message", "system prompt", "stop_reason", "streaming", "context"],
       "running_example": "history를 직접 관리하는 멀티턴 대화"
     },
