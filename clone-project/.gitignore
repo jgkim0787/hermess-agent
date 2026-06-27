@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 logs/
 .venv/
+
+# 실습 스크래치 (일회성 step 스크립트 — 개인 실험, 추적 제외)
+practice/

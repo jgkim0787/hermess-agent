@@ -30,6 +30,20 @@ hermes/
 └── __main__.py  # CLI 진입점            (M0~)
 ```
 
+## 코드를 두는 곳 (실습 vs 클론)
+
+한 모듈에는 성격이 다른 두 종류의 코드가 나옵니다. 위치를 나눠 두면 깔끔합니다.
+
+| 종류 | 무엇 | 위치 | 추적 |
+|------|------|------|------|
+| **클론 (Hermes)** | `Hermes 만들기` — 모듈마다 누적해 키우는 본체 | `hermes/` | 커밋 ⭕ |
+| **실습 스크래치** | `직접 사용해보기` — `stepN.py` 일회용 실험 | `practice/<module-slug>/` | gitignore ❌ |
+| **참조 해답** | 막히면 비교용 정답 스냅샷 | `_solution/<module-slug>/` | 커밋 ⭕ |
+
+- 실습/클론은 같은 `clone-project/` 안에 있어 **venv·`ANTHROPIC_API_KEY`를 공유**합니다(중복 설정 없음).
+- `practice/`는 과금 호출을 하는 개인 실험이라 추적하지 않습니다. 사용법은 `practice/README.md` 참고.
+- 막히면 정답을 보기 전에 사이트 본문을 먼저 다시 보고, 그래도 막히면 `diff hermes/llm.py _solution/<slug>/hermes/llm.py`로 대조하세요.
+
 ## 실행
 
 ```bash
