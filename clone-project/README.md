@@ -4,18 +4,23 @@
 학습 사이트의 각 모듈 "Hermes 만들기" 섹션을 따라 파일을 한두 개씩 추가/확장하세요.
 
 - 목적: 완성도가 아니라 **"이해한 개념이 코드로 어떻게 구현되는가"**를 손으로 확인.
-- 스택: Python 3.10+ · Anthropic Claude API.
+- 스택: Python 3.12 (uv로 관리) · Anthropic Claude API.
 - Hermes는 과정을 거치며 **코딩 → 자율 → RAG** 에이전트의 성격을 차례로 흡수해 마지막에 통합됩니다.
 
-## 시작
+## 시작 (uv)
+
+[uv](https://docs.astral.sh/uv/)로 Python 3.12 환경을 관리합니다. uv가 없으면 `brew install uv`(또는 공식 설치 스크립트).
 
 ```bash
-pip install -r requirements.txt
+uv sync                     # Python 3.12.* 다운로드 + 의존성 설치 (.venv 생성, uv.lock으로 고정)
 cp .env.example .env        # .env 에 본인 ANTHROPIC_API_KEY 입력
 # 또는: export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-> `.env` 는 절대 커밋하지 마세요(`.gitignore`로 제외됨). API 키를 코드에 하드코딩하지 마세요.
+- 파이썬 버전·의존성의 source: `pyproject.toml` + `.python-version`(3.12) + `uv.lock`. 새 패키지는 `uv add <pkg>`.
+- (`requirements.txt`는 plain-pip 사용자를 위해 남겨둠 — uv 사용 시엔 `pyproject.toml`이 우선.)
+
+> `.env`·`.venv/` 는 절대 커밋하지 마세요(`.gitignore`로 제외됨). API 키를 코드에 하드코딩하지 마세요.
 
 ## 모듈별로 자라는 구조 (최종 형태)
 
@@ -47,7 +52,10 @@ hermes/
 ## 실행
 
 ```bash
-python -m hermes "안녕 Hermes"
+uv run python -m hermes                          # 클론(Hermes) 실행 — M1부터는 REPL
+uv run python practice/01-llm-basics/step1.py    # 실습 step 스크립트 실행
 ```
 
-자세한 단계는 학습 사이트의 각 모듈을 따라가세요. (로컬 미리보기: 저장소 루트에서 `python -m http.server 8000 -d docs`)
+> 또는 한 번 활성화 후 평범한 python: `source .venv/bin/activate` → `python -m hermes`
+
+자세한 단계는 학습 사이트의 각 모듈을 따라가세요. (로컬 미리보기는 저장소 루트에서 `python3 -m http.server 8000 -d docs`)

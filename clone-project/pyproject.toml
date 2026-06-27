@@ -1,0 +1,14 @@
+[project]
+name = "hermes-clone"
+version = "0.1.0"
+description = "Hermes — AI Agent 입문 과정에서 직접 만들어 가는 복제 프로젝트 (Python + Anthropic Claude API)"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "anthropic>=0.40",
+    "python-dotenv>=1.0",
+]
+
+# hermes/ 는 'python -m hermes' 로 디렉토리에서 직접 실행한다 — 빌드/설치 대상 패키지가 아님.
+[tool.uv]
+package = false
