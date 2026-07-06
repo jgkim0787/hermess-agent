@@ -30,7 +30,7 @@
       "title": "Tool Use (도구 사용)",
       "summary": "tool_use/tool_result, input_schema, 단일 도구 1-step 호출",
       "flavor": "코딩",
-      "status": "planned",
+      "status": "done",
       "terms": ["tool use", "tool_use", "tool_result", "input_schema", "tool_use_id"],
       "running_example": "read_file 도구 1회 호출"
     },
