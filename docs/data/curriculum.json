@@ -50,7 +50,7 @@
       "title": "Memory & Context",
       "summary": "대화 메모리, context window, 요약/압축(compaction), persona",
       "flavor": "코딩",
-      "status": "planned",
+      "status": "done",
       "terms": ["context window", "memory", "compaction", "persona"],
       "running_example": "길어진 대화의 요약 압축"
     },

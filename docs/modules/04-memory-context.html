@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>4. Memory &amp; Context — Hermes 과정</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body data-page="module" data-slug="04-memory-context">
+  <header class="site-header">
+    <a class="brand" href="../index.html">🛰️ Hermes 과정</a>
+    <button id="navToggle" class="nav-toggle" aria-label="목차 열기">☰</button>
+    <span class="crumb">4. Memory &amp; Context</span>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" id="sidebar"><!-- app.js 가 curriculum.json 으로 채움 --></aside>
+
+    <main class="content">
+      <article class="module">
+        <p class="eyebrow">모듈 4</p>
+        <h1>Memory &amp; Context</h1>
+
+        <!-- ========== 개념 ========== -->
+<section class="module-section" id="concept">
+  <h2>개념</h2>
+  <p>M3에서 우리는 <code>class Hermes</code>가 <code>stop_reason</code>이 <code>end_turn</code>이 될 때까지 도는 agent loop를 만들었다.
+    그 루프는 매 스텝 <code>self.messages</code>(평범한 list)에 assistant 응답과 <code>tool_result</code>를 <code>.append</code>하고,
+    그 커진 list를 <code>messages=self.messages</code>로 <strong>통째로 다시 보낸다</strong>. 그래서 루프가 돌수록 history가
+    <strong>무한정 자란다</strong> — M3 클론의 마지막에서 "이 <code>self.messages</code>가 커진다 → M4에서 다룬다"고 예고했고,
+    <code>agent.py</code>엔 "이 <code>self.messages</code>가 M4에서 <code>Memory</code>로 교체될 자리"라는 주석이 이미 달려 있다.
+    이번 모듈이 그 예고와 주석을 <strong>회수</strong>한다.</p>
+
+  <p>왜 history가 계속 자라야 하는가? <strong>M1의 stateless</strong> 때문이다. Claude API는 상태를 갖지 않는다 —
+    서버는 지난 대화를 기억하지 않는다. 모델이 방금 전 내 말을 "기억하는" 것처럼 보이는 유일한 이유는,
+    <strong>우리가 매 호출마다 전체 <code>messages</code> history를 처음부터 다시 실어 보내기</strong> 때문이다.
+    즉 대화를 이어가려면 우리 쪽이 history를 <strong>누적</strong>해야 하고, 그 누적분을 <strong>매번 통째로 전송</strong>해야 한다.
+    여기서 두 가지 압박이 생긴다 — (1) 한 번의 호출에 실을 수 있는 토큰에는 상한(<strong>context window</strong>)이 있고,
+    (2) 과금은 토큰 기준이라 history가 길수록 <strong>매 스텝이 더 비싸진다</strong>. 길어진 대화를 <strong>줄여야</strong> 하는 이유다.</p>
+
+  <p>M4의 해법은 <code>self.messages</code>를 <strong><code>class Memory</code></strong>로 승격하는 것이다.
+    이 객체는 자기 크기를 문자 수로 <strong>추정</strong>(<code>token_estimate</code>)하고, 그 추정치가 임계를 넘으면
+    <strong>최근 대화 몇 개만 남기고 그 이전 오래된 대화를 요약 1개로 대체</strong>한다(<strong>compaction</strong>).
+    running example은 세 섹션이 공유한다 — <em>순수 텍스트로 길게 주고받은 멀티턴 대화</em>를 임계까지 키운 뒤,
+    <strong>압축 전/후의 토큰 추정치와 메시지 개수를 눈으로 비교</strong>한다. Hermes에 <strong>작업 기억(working memory) 관리</strong>를
+    붙이는 모듈이다.</p>
+
+  <div class="callout note">
+    <strong>표기 규약(★ 세 섹션 공통):</strong> <strong>개념·패턴</strong>은 공백/원어로 —
+    <strong>memory</strong>/"메모리", <strong>context window</strong>(공백), <strong>compaction</strong>/"압축", <strong>persona</strong>, "토큰 추정".
+    <strong>코드·식별자·API 값</strong>은 코드 표기로 — <code>class Memory</code>, <code>self.memory</code>, <code>.append()</code>,
+    <code>.to_messages()</code>, <code>.token_estimate()</code>, <code>.compact()</code>, 그리고 <code>system=</code>·<code>messages=</code>·<code>tool_use</code>·<code>tool_result</code>.
+    특히 헷갈리기 쉬운 쌍을 구분한다 — 개념 <strong>"토큰 추정"</strong> vs 메서드 <code>token_estimate()</code> /
+    개념 <strong>"압축"·"compaction"</strong> vs 메서드 <code>compact()</code> / 개념 <strong>"메모리"</strong> vs 클래스 <code>Memory</code>.
+  </div>
+
+  <h3>대화 메모리란 — history가 곧 기억</h3>
+  <div class="callout note">
+    <strong>정의 — memory(메모리):</strong> 에이전트가 지난 대화를 이어가려고 <strong>누적·관리하는 대화 history</strong>.
+    그 자체가 서버에 저장된 상태가 아니라, 우리가 <strong>매 호출 통째로 재전송</strong>하기에 "기억"으로 작동한다.
+    익숙한 비유로는 프로세스의 <strong>작업 메모리 / 세션 상태</strong>다 — 요청과 요청 사이에 우리가 손으로 들고 있는 대화 맥락.
+  </div>
+  <p>그래서 "메모리 관리"란 결국 <strong>무엇을 history에 남기고, 무엇을 줄일지</strong>의 문제다. 저장소를 새로 붙이는 게 아니라,
+    이미 들고 있는 <code>messages</code> 리스트를 <strong>얼마나·어떻게 유지할지</strong>를 정하는 것이다.</p>
+  <div class="callout warn">
+    <strong>흔한 혼동 — 이 "memory"는 RAG가 아니다:</strong> 여기서 말하는 메모리는
+    "<strong>방금까지 무슨 대화를 했나</strong>"를 이어가는 <strong>working memory</strong>, 즉 <strong>대화 history 관리</strong>다.
+    "내가 모르는 외부 지식을 <strong>검색</strong>해 프롬프트에 넣는" <strong>RAG(벡터 검색·임베딩·유사도)</strong>와는 다른 문제다.
+    M4는 대화를 <strong>저장하고 요약</strong>할 뿐, 무엇도 <em>검색</em>하지 않는다. RAG는 <strong>M6</strong>에서 따로 다룬다.
+  </div>
+
+  <h3>context window와 비용 — 길수록 부딪히고, 길수록 비싸다</h3>
+  <div class="callout note">
+    <strong>정의 — context window:</strong> 모델이 <strong>한 번의 호출에서 다룰 수 있는 토큰 총량의 상한</strong>.
+    프롬프트 입력(우리가 보낸 <code>messages</code>)과 생성 출력이 <strong>이 한도 안에</strong> 함께 들어가야 한다. 넘으면 못 넣는다.
+    비유하면 함수의 <strong>입력 버퍼 한도</strong> — 버퍼에 안 들어가는 데이터는 실을 수 없다.
+  </div>
+  <p>agent loop는 M1의 stateless 원리대로 <strong>매 스텝 커진 history를 통째로 재전송</strong>한다. 그래서 문제가 두 겹이다.</p>
+  <ul>
+    <li><strong>한도(context window):</strong> history가 계속 자라면 언젠가 한 호출에 실을 수 있는 토큰 상한을 넘는다 — 그 너머는 못 보낸다.</li>
+    <li><strong>비용:</strong> 과금은 input/output <strong>토큰</strong> 기준이다. history가 10K tokens까지 자랐다면, 그 뒤로는
+      <strong>매 스텝마다 그 10K를 input으로 다시</strong> 실어 보낸다 — 같은 대화를 스텝마다 반복 과금하는 셈이다.</li>
+  </ul>
+  <div class="callout why">
+    <strong>왜 "한도보다 비용"이 실질 동기인가:</strong> 코스 기본 모델 <code>claude-sonnet-4-6</code>의 context window는
+    <strong>1M tokens</strong>로 매우 크다 — 웬만한 대화로는 <em>한도에 잘 안 부딪힌다</em>. 하지만 과금은
+    <strong>$3 / $15 per 1M tokens</strong>(input/output)라, 긴 history를 매 스텝 재전송하는 비용은
+    <strong>한도에 닿기 훨씬 전부터</strong> 꾸준히 쌓인다. 그래서 실무의 압축 동기는 대개 "터져서"가 아니라 "비싸져서"다.
+    (그래서 클론에서는 압축을 <em>눈으로 보려고</em> 임계를 일부러 낮게 잡는다 — 1M을 채울 순 없으니까.)
+  </div>
+  <div class="callout warn">
+    <strong>비유의 한계:</strong> "입력 버퍼"는 넘치면 조용히 잘리기도 하지만, context window는 넘기면 API가 <strong>거부(에러)</strong>한다.
+    또 버퍼와 달리 <strong>입력과 출력이 같은 한도를 나눠 쓴다</strong> — 프롬프트를 한도까지 채우면 답할 자리가 없어진다.
+  </div>
+
+  <h3>토큰을 대충 재기 — token_estimate</h3>
+  <div class="callout note">
+    <strong>정의 — token_estimate(토큰 추정):</strong> 정확한 토크나이저를 부르지 않고 <strong>문자 수 등으로 토큰 수를 근사</strong>하는 것.
+    "지금 history가 대략 몇 토큰인가"를 즉시 가늠하는 <strong>빠른 가늠자</strong>다. 비유하면 정확한 프로파일링 대신
+    <code>len()</code>으로 대충 크기를 재는 것 — 정밀하진 않아도 "임계를 넘었나?"를 판단하는 데는 충분하다.
+  </div>
+  <p>구현은 한 줄이면 된다 — 모든 메시지의 문자 수를 더해 4로 나눈다(영어·코드 기준 대략 4자 ≈ 1토큰).</p>
+  <pre><code class="language-python">def token_estimate(messages) -&gt; int:
+    # 문자 수 // 4 ≈ 토큰 수. 정확한 토크나이저 대신 싼 근사.
+    return sum(len(_text_of(m)) for m in messages) // 4
+
+def _text_of(msg):
+    # content 가 문자열이 아니라 블록 리스트/dict 여도 안전하게 문자열로.
+    c = msg["content"]
+    return c if isinstance(c, str) else str(c)</code></pre>
+  <div class="callout why">
+    <strong>왜 정확히 안 재는가:</strong> Claude에는 정확한 측정 API(<code>client.messages.count_tokens</code>)가 있지만,
+    이건 <strong>네트워크 왕복</strong>이 드는 또 하나의 호출이다. 압축을 <em>발동할지 말지</em>를 정하는 가드에는
+    "정확히 8,213토큰"이 필요 없다 — "임계를 넘겼나 아닌가"만 알면 된다. 그 판단엔 문자 수 나눗셈이면 충분히 빠르고 싸다.
+    (정밀 측정·prompt caching은 범위 밖 — 여기선 <strong>일부러 싼 추정치</strong>를 쓴다.)
+  </div>
+
+  <h3>compaction — 최근은 보존, 오래된 건 요약 1개로</h3>
+  <div class="callout note">
+    <strong>정의 — compaction(압축):</strong> context window·비용을 아끼려고 <strong>오래된 대화 메시지들을 요약 1개로 대체</strong>해
+    history 토큰을 줄이는 것. 비유하면 로그 <strong>compaction/rotation</strong>, 또는 슬라이딩 윈도우에 <strong>접힌 요약 헤더</strong>를 붙이는 것 —
+    최근 항목은 원본 그대로 두고, 오래된 항목은 한 덩어리 요약으로 접는다.
+  </div>
+  <p>정책은 두 부분이다 — <strong>최근 <code>keep_recent</code>개는 원본 보존</strong>(대화를 매끄럽게 이어가야 하니까),
+    <strong>그 이전 오래된 것들은 하나의 요약으로 접기</strong>. 요약을 만드는 일은 마법이 아니라 <strong>또 한 번의 LLM 호출</strong>이다 —
+    "이 로그를 요약해줘"라고 모델에게 부탁한다.</p>
+  <pre><code class="language-python">def compact(messages, keep_recent):
+    recent = messages[-keep_recent:]     # 최근 대화는 그대로 이어간다
+    old    = messages[:-keep_recent]     # 그 이전 오래된 대화는
+    summary = _summarize(old)            # 별도 LLM 호출로 요약 1개로 접는다
+    # 요약을 '맨 앞 user 메시지'로 넣고, 최근 대화를 뒤에 붙인다.
+    return [{"role": "user", "content": f"[이전 대화 요약]\n{summary}"}] + recent
+
+def _summarize(old) -&gt; str:
+    log = "\n".join(f"{m['role']}: {_text_of(m)}" for m in old)
+    resp = client.messages.create(       # ← 요약도 결국 한 번의 create 호출
+        model=MODEL, max_tokens=512,
+        system="다음 대화 로그를 이후 대화에 필요한 사실 위주로 3~5문장으로 요약해줘.",
+        messages=[{"role": "user", "content": log}],   # tools 없음, Hermes persona 아님
+    )
+    return "".join(b.text for b in resp.content if b.type == "text")</code></pre>
+  <p>요약을 <strong>맨 앞 <code>user</code> 메시지</strong>로 넣는 데는 이유가 있다 — history는 항상 <code>user</code>로 시작해야 하므로(M1),
+    이렇게 하면 압축 후에도 첫 메시지가 언제나 <code>user</code>라 안전하다. 클론에서는 이 정책을
+    <code>class Memory</code>의 <code>.compact()</code>·<code>._summarize()</code> 메서드로 감싸고,
+    <code>.token_estimate()</code>가 임계를 넘는 순간 <code>.to_messages()</code> 안에서 자동으로 <code>.compact()</code>가 돌게 한다.</p>
+  <p>running example로 돌려보면 압축의 효과가 수치로 보인다 — 순수 텍스트 멀티턴 대화를 임계까지 키운 뒤 압축하면, 이런 모양이 관찰된다.</p>
+  <pre><code class="language-text">압축 전:  messages 여러 개,   token_estimate = (임계 초과)
+   ↓  compact()  — 최근 몇 개는 보존, 그 이전은 요약 1개로 접기
+압축 후:  messages = 요약 1개 + 최근 몇 개,   token_estimate = (임계 아래로 ↓)</code></pre>
+  <p>메시지 개수와 토큰 추정치가 <strong>둘 다 줄어든다</strong>. 그리고 압축된 history로도 "최근 맥락"이 살아 있어 대화를 한 턴 더 이어갈 수 있다.
+    (실습에서 <strong>압축 전/후의 <code>token_estimate</code>와 메시지 개수를 직접 print</strong>해 실제 숫자로 확인한다.)</p>
+  <div class="callout warn">
+    <strong>비유의 한계:</strong> 로그 rotation은 오래된 로그를 <em>버리거나 그대로 아카이브</em>하지만(원본 복구 가능),
+    compaction은 요약이라 <strong>디테일이 영구적으로 유실되는 손실 압축</strong>이다. 게다가 요약 자체가
+    <strong>또 한 번의 유료 LLM 호출</strong>이라 공짜가 아니다 — 그래서 <em>가끔만</em> 발동하도록 임계를 잡는다.
+  </div>
+
+  <h3>압축의 함정 — 쌍을 쪼개지 마라</h3>
+  <p>순수 텍스트 대화라면 아무 데서나 잘라 요약해도 된다. 하지만 진짜 Hermes의 history에는 M2에서 배운
+    <code>tool_use</code>(assistant) ↔ <code>tool_result</code>(user) <strong>쌍</strong>이 섞여 있다. 여기서 함정이 생긴다.</p>
+  <div class="callout warn">
+    <strong>함정 — 요약 경계가 쌍을 쪼개면 400:</strong> 오래된 앞부분을 요약으로 접을 때, 경계가 하필
+    <code>tool_use</code>와 그 짝 <code>tool_result</code> <strong>사이</strong>를 지나면 어떻게 될까?
+    <code>tool_use</code>는 요약에 먹혀 사라지고 짝 없는 <code>tool_result</code>만 남거나, 그 반대가 된다.
+    그러면 다음 <code>create</code> 호출이 <strong>400</strong>을 낸다 — M2에서 배운 바로 그 "짝이 안 맞는 tool 블록" 에러다.
+    <strong>해법(개념):</strong> 보존 경계가 <code>tool_result</code>에서 시작하면, 경계를 <strong>한 칸씩 앞으로 물려</strong>
+    <code>tool_use</code>와 <code>tool_result</code>가 <strong>같은 쪽(요약되거나, 보존되거나)</strong>에 오게 한다.
+    (실제 경계 가드 코드 <code>_is_tool_result_turn</code>은 "Hermes 만들기"에서 다룬다 — 여기선 "쌍을 깨지 마라"만 기억하면 된다.)
+  </div>
+  <p>기억할 원칙은 M2의 교훈 그대로다 — <strong>400은 값보다 먼저 쌍·id 매칭을 의심하라</strong>. 압축은 그 쌍을 자기도 모르게 깰 수 있는 새 위험이다.</p>
+
+  <h3>persona는 메모리 밖에 있다</h3>
+  <div class="callout note">
+    <strong>정의 — persona:</strong> <code>system</code> prompt로 부여하는 에이전트의 <strong>고정 정체성·항구 규칙</strong>(M1의 <code>SYSTEM</code>).
+    <code>messages</code>(history) 밖 <strong>별도 슬롯</strong>(<code>system=</code>)에 있어, compaction의 영향을 받지 않고 매 호출 항상 함께 전송된다.
+    비유하면 프로세스의 <strong>환경설정 / 불변 규칙</strong> — 런타임 로그(대화)와 분리되어, 로그를 접어도 규칙은 그대로다.
+  </div>
+  <p>이 구분이 메모리 설계의 한 축이다. compaction은 <strong><code>messages</code>(소모성 대화)</strong>만 접는다 —
+    <code>system=SYSTEM</code>에 있는 persona는 <strong>history가 아니므로 압축이 건드리지 않는다</strong>.
+    덕분에 오래된 대화를 아무리 접어도 에이전트의 정체성·규칙은 사라지지 않고, 매 호출 <strong>싸게(항상 같은 짧은 텍스트로)</strong> 함께 간다.
+    "무엇이 항구 규칙(<code>system</code>)이고 무엇이 소모성 대화(<code>messages</code>)인가"를 나누는 것 자체가 메모리 설계의 핵심이다.</p>
+
+  <h3>한눈 정리</h3>
+  <ul>
+    <li><strong>메모리 = 대화 history 관리</strong>다. 모델이 "기억"하는 건 M1의 stateless 때문에 <strong>우리가 매 호출 history를 통째로 재전송</strong>하기 때문 — 그래서 history가 길수록 <strong>context window</strong>에 부딪히고 매 스텝이 <strong>비싸진다</strong>. (이 메모리는 <strong>RAG가 아니다</strong> — 검색이 아니라 대화 저장·요약. RAG는 M6.)</li>
+    <li><strong>token_estimate</strong> = 문자 수 // 4 근사. 정확한 <code>count_tokens</code>는 네트워크 왕복이라, "임계를 넘었나"만 보는 가드엔 <strong>싼 추정</strong>이면 충분하다.</li>
+    <li><strong>compaction</strong> = 추정치가 임계를 넘으면 <strong>최근 <code>keep_recent</code>개는 보존</strong>하고 그 이전 오래된 대화를 <strong>요약 1개로 대체</strong>(요약은 <strong>별도 LLM 호출</strong>). 요약은 맨 앞 <code>user</code> 메시지로 넣는다. 메시지 수·토큰이 함께 줄되 최근 맥락은 살아 있다.</li>
+    <li><strong>함정 = 쌍을 쪼개지 마라</strong>. 요약 경계가 <code>tool_use</code>/<code>tool_result</code>(M2) 사이를 지나면 <strong>400</strong> — 경계를 쌍 밖으로 물린다.</li>
+    <li><strong>persona는 메모리 밖</strong>. <code>system=</code> 슬롯의 항구 규칙이라 compaction에 안 사라지고 매 호출 싸게 함께 간다.</li>
+    <li><strong>범위</strong> = 여기까지가 <strong>대화 메모리 관리 + context window 인식 + 요약 압축</strong>. 목표 분해(planning)와 위험 도구 <strong>승인 게이트</strong>는 <strong>M5</strong>, 외부 지식 <strong>검색(RAG)</strong>은 <strong>M6</strong>에서 다룬다.</li>
+  </ul>
+</section>
+
+        <!-- ========== 직접 사용해보기 ========== -->
+<section class="module-section" id="practice">
+  <h2>직접 사용해보기</h2>
+  <p class="hint">아래 코드를 직접 타이핑해 실행해 보세요. 전제: <code>clone-project</code>를 <code>uv</code>로 셋업(Python 3.12), 그리고 <code>ANTHROPIC_API_KEY</code>.
+    실습 파일은 <code>clone-project/practice/04-memory-context/stepN.py</code>에 두고
+    <code>cd clone-project &amp;&amp; uv run python practice/04-memory-context/stepN.py</code>로 실행합니다.
+    각 <code>stepN.py</code>는 그대로 실행되도록 대화 데이터·client 초기화를 포함합니다
+    (<code>practice/</code>는 <code>.gitignore</code>된 개인 실험 공간입니다).</p>
+
+  <p>M3에서 <code>class Hermes</code>는 매 스텝 <code>self.messages</code>에 대화를 쌓고 <code>messages=self.messages</code>로 그 <strong>전체를 통째로 재전송</strong>했다 —
+    루프가 돌수록 history가 <strong>무한정 커진다</strong>. 왜 매번 통째로 다시 보내나? <strong>API는 stateless</strong>라 지난 대화를 스스로 기억하지 못하기 때문이다(M1).
+    모델의 "기억"은 곧 <strong>우리가 매 호출 history 전체를 다시 보내는 것</strong>이고, 그래서 대화가 길수록 <strong>매 호출이 더 비싸지고</strong>(입력 토큰이 늘어난다)
+    언젠가 <code>context window</code> 한도에 부딪힌다. 그러니 오래된 대화를 <strong>줄여야</strong> 한다.
+    이번 실습은 그 줄이기 = <strong>compaction</strong>을 순수 텍스트 대화로 손에 익힌다:
+    (1) 문자 수로 토큰을 <strong>추정</strong>하고, (2) 임계를 넘으면 <strong>최근 몇 개만 남기고 오래된 대화를 요약 1개로 대체</strong>한 뒤,
+    (3) 압축 전/후의 <strong>토큰 수·메시지 수를 눈으로</strong> 비교한다.</p>
+
+  <div class="callout note">
+    <strong>이 실습은 도구 없는 순수 텍스트 대화다.</strong> user/assistant 텍스트만 주고받으므로 <code>tool_use</code>/<code>tool_result</code> <strong>쌍이 없다</strong> →
+    요약 경계가 그 쌍을 쪼개 400을 내는 <strong>함정이 아예 생기지 않는다</strong>. 덕분에 "추정 → 임계 → 최근 보존 → 요약 1개로 대체 → 축소"라는 <strong>압축 절차 자체</strong>에만 집중한다.
+    (쌍이 섞인 실제 Hermes history의 경계 함정은 <strong>클론(Hermes 만들기)</strong>에서 실물로 만난다 — 같은 압축 골격에 <em>경계 가드</em>만 더한다.)
+  </div>
+
+  <h3>0) 준비</h3>
+  <pre><code class="language-bash">cd clone-project
+uv sync                                   # Python 3.12.* + 의존성 (.venv 생성, 최초 1회)
+export ANTHROPIC_API_KEY="sk-ant-..."     # 본인 키로 (코드에 하드코딩 금지)
+mkdir -p practice/04-memory-context       # 이번 모듈 실습 폴더</code></pre>
+  <div class="callout note">
+    M1~M3와 동일 환경이다(uv, Python 3.12). 키는 <a href="https://console.anthropic.com/">console.anthropic.com</a>에서 발급한다.
+    <strong>아래 step1은 API를 부르지 않으니 키가 없어도</strong> 실행된다(토큰 추정은 순수 파이썬 계산). 요약을 만드는 <strong>step2만</strong> API를 부른다 —
+    이때도 <strong>요약 호출은 딱 1번</strong>이고 <code>max_tokens</code>를 작게(512) 잡아 비용을 억제한다.
+  </div>
+
+  <h3>1) 긴 대화 만들기 + 토큰 추정 — <code>token_estimate</code> (키 불필요)</h3>
+  <p>먼저 한 주제(제주도 여행)로 길게 주고받은 <strong>순수 텍스트 대화</strong>를 <code>messages</code>에 만든다. 그리고 정확한 토크나이저 대신
+    <strong>전체 문자 수 // 4</strong>로 토큰을 <strong>추정</strong>하는 <code>token_estimate</code>를 정의해 "지금 대략 몇 토큰인가"를 즉시 잰다.
+    이 파일은 <strong>API를 부르지 않으므로</strong> 키 없이도 돌아간다.</p>
+  <pre><code class="language-python"># step1.py — 순수 텍스트 멀티턴 대화를 만들고, 문자 수로 토큰을 "추정"한다
+#            (API 호출 없음 — 키가 없어도 실행된다. 압축은 step2에서.)
+
+# 한 주제(제주도 여행)로 길게 주고받은 대화. user/assistant 텍스트만 — 도구 없음.
+messages = [
+    {"role": "user", "content": "제주도로 3박 4일 여행을 가려고 해. 전체 일정을 대략 잡아줄래?"},
+    {"role": "assistant", "content": "좋아요. 1일차는 제주시에 도착해 동쪽 해안 도로를 따라 함덕과 김녕을 둘러보고, 2일차는 성산과 우도, 3일차는 서귀포와 중문 관광단지, 4일차는 서쪽 애월과 한림을 돌아 공항으로 돌아오는 동선을 추천해요. 이동 거리가 하루에 몰리지 않게 방향을 나눴고, 저녁에는 숙소 근처에서 여유롭게 쉬도록 일정을 비워 뒀어요."},
+    {"role": "user", "content": "렌터카는 꼭 필요할까? 대중교통으로도 다닐 수 있어?"},
+    {"role": "assistant", "content": "가능은 하지만 버스 배차 간격이 길어 대기 시간이 많이 듭니다. 해안 명소를 자유롭게 다니려면 렌터카가 훨씬 편해요. 운전이 부담되면 관광지 순환버스와 택시를 섞고, 숙소를 한 지역에 잡아 이동을 줄이는 방법도 있어요. 성수기에는 렌터카가 일찍 매진되니 예약을 서두르는 게 안전하고, 결제 전에 완전자차 보험을 포함하면 사고 걱정을 크게 덜 수 있어요."},
+    {"role": "user", "content": "먹을거리도 궁금해. 제주에서 꼭 먹어야 할 음식 몇 개만 알려줘."},
+    {"role": "assistant", "content": "흑돼지 구이, 고기국수, 갈치조림, 성게미역국, 그리고 한라봉으로 만든 디저트가 대표적이에요. 해안가 인기 식당은 점심·저녁 예약이 빨리 차니 하루 전에 미리 잡아두는 게 좋아요. 오분자기 뚝배기는 아침 식사로 좋고, 시장에서는 오메기떡이나 감귤 주스도 간식으로 즐기기 좋아요."},
+    {"role": "user", "content": "숙소는 어느 지역에 잡는 게 동선상 편할까?"},
+    {"role": "assistant", "content": "일정이 동쪽과 서쪽으로 나뉘니 숙소를 한 곳만 잡으면 이동이 길어져요. 앞 이틀은 성산 쪽, 뒤 이틀은 서귀포나 중문 쪽으로 나눠 잡으면 매일 아침 출발이 짧아집니다. 짐을 한 번만 옮기면 되니 부담도 적고, 체크인 전에는 숙소에 짐을 맡기고 근처부터 둘러봐도 됩니다. 성산 쪽 숙소는 일출 명소와 가까워 이른 아침 이동이 편합니다."},
+    {"role": "user", "content": "여행은 다음 달인데 날씨랑 챙겨야 할 준비물도 알려줄래?"},
+    {"role": "assistant", "content": "그 시기 제주는 바람이 강하고 해안은 체감 온도가 낮아 얇은 겉옷을 꼭 챙기세요. 비가 오락가락하는 날이 많아 우산보다 방수 재킷이 편하고, 오름이나 올레길을 걸을 계획이면 미끄럽지 않은 운동화가 좋아요. 자외선이 강하니 선크림과 모자, 물도 넉넉히 챙기면 야외 활동이 한결 편합니다."},
+    {"role": "user", "content": "2일차 성산 일정에서 우도는 어떻게 들어가?"},
+    {"role": "assistant", "content": "성산항에서 배로 약 15분이면 우도에 들어가요. 우도 안에서는 전기차나 자전거를 빌려 해안 도로를 한 바퀴 도는 코스가 인기예요. 첫 배가 이른 아침이라 서두르면 붐비기 전에 한적하게 섬을 즐길 수 있어요."},
+    {"role": "user", "content": "3일차 서귀포에서 해 지는 걸 보기 좋은 곳이 있을까?"},
+    {"role": "assistant", "content": "서귀포 쪽이라면 외돌개와 대포주상절리 해안이 노을 명소예요. 특히 대포주상절리는 주상절리 절벽과 바다가 함께 붉게 물들어 사진이 잘 나와요. 해 지기 30분 전에 도착해 자리를 잡길 권해요."},
+]
+
+# content를 문자열로 안전하게 꺼낸다(지금은 다 문자열이지만, 블록 리스트/dict도 대비).
+def _text_of(msg):
+    c = msg["content"]
+    return c if isinstance(c, str) else str(c)
+
+# 정확한 토크나이저 대신 '전체 문자 수 // 4'로 토큰을 근사한다(가드용 빠른 가늠자).
+def token_estimate(messages):
+    return sum(len(_text_of(m)) for m in messages) // 4
+
+print(f"메시지 수: {len(messages)}")
+print(f"토큰 추정: {token_estimate(messages)}")
+print(f"threshold(=300) 초과? {token_estimate(messages) > 300}")</code></pre>
+  <pre><code class="language-bash">uv run python practice/04-memory-context/step1.py</code></pre>
+  <pre class="output">메시지 수: 14
+토큰 추정: 326
+threshold(=300) 초과? True</pre>
+  <div class="callout note">
+    <strong>왜 "정확히"가 아니라 "대충"인가?</strong> 정확한 토큰 수는 <code>client.messages.count_tokens(...)</code>로 잴 수 있지만 <strong>네트워크 왕복</strong>이 든다.
+    임계를 넘겼는지 판단하는 <strong>가드</strong>에는 그렇게까지 정확할 필요가 없다 — <code>len(text) // 4</code> 같은 싼 근사면 충분하다(<code>len()</code>으로 대충 크기 재기와 같다).
+    그래서 <code>token_estimate</code>가 내놓는 <strong>326은 "약 326"</strong>이다. 정확값을 기대하지 말 것.
+  </div>
+
+  <h3>2) 미니 compaction — 오래된 앞부분을 요약 1개로 대체</h3>
+  <p>이제 <code>threshold = 300</code>을 넘었으니(step1에서 확인) 압축한다. 정책은 하나다 —
+    <strong>최근 <code>keep_recent</code>개는 그대로 보존</strong>하고, 그 이전 오래된 메시지들은 <strong>별도 LLM 호출 하나로 요약</strong>해 <strong>메시지 1개</strong>로 접는다.
+    그 요약을 <strong>맨 앞의 <code>user</code> 메시지</strong>로 끼워 넣는다(첫 메시지는 언제나 <code>user</code>여야 하므로). step1의 대화를 그대로 포함해 이 파일 하나로 실행된다.</p>
+  <pre><code class="language-python"># step2.py — 미니 compaction: 토큰 추정이 임계를 넘으면 오래된 앞부분을 요약 1개로 접는다
+#            (step1의 대화·token_estimate를 그대로 포함해 이 파일 하나로 실행된다)
+import anthropic
+
+client = anthropic.Anthropic()          # ANTHROPIC_API_KEY 환경변수 자동 사용
+MODEL = "claude-sonnet-4-6"
+
+threshold = 300      # ★ 학습용으로 낮게 — 짧은 대화로도 압축이 발동하도록(실제 한도는 훨씬 큼)
+keep_recent = 4      # 압축 시 그대로 보존할 최근 메시지 수(그 이전을 요약 1개로)
+
+# step1과 동일한 순수 텍스트 대화(도구 없음 — tool_use/tool_result 쌍이 없다)
+messages = [
+    {"role": "user", "content": "제주도로 3박 4일 여행을 가려고 해. 전체 일정을 대략 잡아줄래?"},
+    {"role": "assistant", "content": "좋아요. 1일차는 제주시에 도착해 동쪽 해안 도로를 따라 함덕과 김녕을 둘러보고, 2일차는 성산과 우도, 3일차는 서귀포와 중문 관광단지, 4일차는 서쪽 애월과 한림을 돌아 공항으로 돌아오는 동선을 추천해요. 이동 거리가 하루에 몰리지 않게 방향을 나눴고, 저녁에는 숙소 근처에서 여유롭게 쉬도록 일정을 비워 뒀어요."},
+    {"role": "user", "content": "렌터카는 꼭 필요할까? 대중교통으로도 다닐 수 있어?"},
+    {"role": "assistant", "content": "가능은 하지만 버스 배차 간격이 길어 대기 시간이 많이 듭니다. 해안 명소를 자유롭게 다니려면 렌터카가 훨씬 편해요. 운전이 부담되면 관광지 순환버스와 택시를 섞고, 숙소를 한 지역에 잡아 이동을 줄이는 방법도 있어요. 성수기에는 렌터카가 일찍 매진되니 예약을 서두르는 게 안전하고, 결제 전에 완전자차 보험을 포함하면 사고 걱정을 크게 덜 수 있어요."},
+    {"role": "user", "content": "먹을거리도 궁금해. 제주에서 꼭 먹어야 할 음식 몇 개만 알려줘."},
+    {"role": "assistant", "content": "흑돼지 구이, 고기국수, 갈치조림, 성게미역국, 그리고 한라봉으로 만든 디저트가 대표적이에요. 해안가 인기 식당은 점심·저녁 예약이 빨리 차니 하루 전에 미리 잡아두는 게 좋아요. 오분자기 뚝배기는 아침 식사로 좋고, 시장에서는 오메기떡이나 감귤 주스도 간식으로 즐기기 좋아요."},
+    {"role": "user", "content": "숙소는 어느 지역에 잡는 게 동선상 편할까?"},
+    {"role": "assistant", "content": "일정이 동쪽과 서쪽으로 나뉘니 숙소를 한 곳만 잡으면 이동이 길어져요. 앞 이틀은 성산 쪽, 뒤 이틀은 서귀포나 중문 쪽으로 나눠 잡으면 매일 아침 출발이 짧아집니다. 짐을 한 번만 옮기면 되니 부담도 적고, 체크인 전에는 숙소에 짐을 맡기고 근처부터 둘러봐도 됩니다. 성산 쪽 숙소는 일출 명소와 가까워 이른 아침 이동이 편합니다."},
+    {"role": "user", "content": "여행은 다음 달인데 날씨랑 챙겨야 할 준비물도 알려줄래?"},
+    {"role": "assistant", "content": "그 시기 제주는 바람이 강하고 해안은 체감 온도가 낮아 얇은 겉옷을 꼭 챙기세요. 비가 오락가락하는 날이 많아 우산보다 방수 재킷이 편하고, 오름이나 올레길을 걸을 계획이면 미끄럽지 않은 운동화가 좋아요. 자외선이 강하니 선크림과 모자, 물도 넉넉히 챙기면 야외 활동이 한결 편합니다."},
+    {"role": "user", "content": "2일차 성산 일정에서 우도는 어떻게 들어가?"},
+    {"role": "assistant", "content": "성산항에서 배로 약 15분이면 우도에 들어가요. 우도 안에서는 전기차나 자전거를 빌려 해안 도로를 한 바퀴 도는 코스가 인기예요. 첫 배가 이른 아침이라 서두르면 붐비기 전에 한적하게 섬을 즐길 수 있어요."},
+    {"role": "user", "content": "3일차 서귀포에서 해 지는 걸 보기 좋은 곳이 있을까?"},
+    {"role": "assistant", "content": "서귀포 쪽이라면 외돌개와 대포주상절리 해안이 노을 명소예요. 특히 대포주상절리는 주상절리 절벽과 바다가 함께 붉게 물들어 사진이 잘 나와요. 해 지기 30분 전에 도착해 자리를 잡길 권해요."},
+]
+
+def _text_of(msg):
+    c = msg["content"]
+    return c if isinstance(c, str) else str(c)
+
+def token_estimate(messages):
+    return sum(len(_text_of(m)) for m in messages) // 4
+
+# 오래된 메시지들을 '별도 LLM 호출' 하나로 요약한다 — tools 없음, 짧은 max_tokens.
+def summarize(old):
+    log = "\n".join(f"{m['role']}: {_text_of(m)}" for m in old)
+    resp = client.messages.create(
+        model=MODEL, max_tokens=512,
+        system="다음 대화 로그를 이후 대화에 필요한 사실 위주로 3~5문장으로 간결히 요약해줘.",
+        messages=[{"role": "user", "content": log}],   # 요약도 그냥 한 번의 messages.create
+    )
+    return "".join(b.text for b in resp.content if b.type == "text")
+
+# 최근 keep_recent개는 그대로 두고, 그 이전(old)을 요약 1개로 대체한다.
+def compact(messages):
+    old = messages[:-keep_recent]      # 오래된 앞부분
+    recent = messages[-keep_recent:]   # 최근 keep_recent개(그대로 보존)
+    summary = summarize(old)
+    # 요약을 '첫 user 메시지'로 prepend -> history는 항상 user로 시작(첫 메시지 user 규칙)
+    return [{"role": "user", "content": f"[이전 대화 요약]\n{summary}"}] + recent
+
+# --- 압축 전: 토큰·메시지 수 ---
+print(f"[압축 전] tokens~{token_estimate(messages)}  msgs={len(messages)}")
+
+# 임계를 넘으면 compaction (이 조건이 클론 Memory.to_messages 의 자동 발동과 같다)
+if token_estimate(messages) > threshold:
+    messages = compact(messages)
+    print("  -> 임계 초과 -> compaction 실행 (오래된 대화 = 요약 1개)")
+
+# --- 압축 후: 토큰·메시지 수 ---
+print(f"[압축 후] tokens~{token_estimate(messages)}  msgs={len(messages)}")
+
+# --- 압축된 history 로 한 턴 더: '최근 맥락'이 살아있는지 확인 ---
+messages.append({"role": "user",
+                 "content": "방금 알려준 3일차 노을 명소 두 곳 이름만 다시 정리해줘."})
+resp = client.messages.create(model=MODEL, max_tokens=512, messages=messages)
+answer = "".join(b.text for b in resp.content if b.type == "text")
+print(f"[이어가기] {answer}")</code></pre>
+  <div class="callout why">
+    <strong>요약은 "그냥 또 한 번의 <code>messages.create</code>"다.</strong> 특별한 API가 아니다 — 오래된 대화를 로그 문자열로 이어붙여
+    <code>system="...요약해줘"</code>로 한 번 부르면 된다. 단 두 가지가 중요하다: (1) <strong><code>tools</code>를 넘기지 않는다</strong>(순수 텍스트 요약이라 도구가 필요 없다),
+    (2) <strong><code>max_tokens</code>를 작게</strong>(여기선 512) 잡아 요약이 짧고 싸게 나오게 한다. 이 요약 1개가 오래된 여러 메시지를 대신한다.
+  </div>
+
+  <h3>3) 돌려보기 — 압축 전/후 토큰·메시지 수를 눈으로 비교</h3>
+  <p>실행하면 <strong>압축 전 → 압축 후</strong>로 토큰 추정치와 메시지 수가 함께 줄어드는 것을 볼 수 있다. 마지막 <code>[이어가기]</code>는
+    <strong>압축된 history</strong>로 한 턴 더 물어본 것이다 — 오래된 앞부분은 요약으로 접혔지만 <strong>최근 4개는 그대로 남아</strong> 노을 명소를 정확히 답한다.</p>
+  <pre><code class="language-bash">uv run python practice/04-memory-context/step2.py</code></pre>
+  <pre class="output">[압축 전] tokens~326  msgs=14
+  -> 임계 초과 -> compaction 실행 (오래된 대화 = 요약 1개)
+[압축 후] tokens~117  msgs=5
+[이어가기] 3일차 노을 명소로 알려드린 곳은 외돌개와 대포주상절리 두 곳입니다.</pre>
+  <div class="callout note">
+    <strong>무엇이 정확하고 무엇이 모델마다 다른가.</strong>
+    <ul>
+      <li><strong>정확(결정적):</strong> 압축 <em>전</em> <code>tokens~326</code>·<code>msgs=14</code>와, 압축 <em>후</em> <code>msgs=5</code>. 메시지 수는 항상 <strong>14 → 5</strong>다
+        (오래된 10개가 <strong>요약 1개</strong>로 접히고 + 보존한 최근 4개 = 5). <code>token_estimate</code>가 <code>문자수 // 4</code>라는 결정적 식이라 <code>326</code>은 손으로도 같은 값이 나온다.</li>
+      <li><strong>모델마다 다름:</strong> 압축 <em>후</em> <code>tokens~117</code>과 <code>[이어가기]</code> 문장. 요약은 <strong>모델 출력</strong>이라 길이·문구가 매번 다르다 —
+        요약이 조금 길거나 짧으면 <code>117</code>은 <code>90~150</code> 사이로 흔들린다. <strong>핵심은 값이 아니라 방향</strong>: <code>326 → 100대</code>로, <code>14개 → 5개</code>로 <strong>확 줄었다</strong>.</li>
+    </ul>
+  </div>
+  <div class="callout why">
+    <strong>왜 이게 "메모리 관리"인가.</strong> 요약된 옛 대화(일정·렌터카·음식·숙소·준비물)에는 <strong>노을 명소 이름이 없다</strong> — 그건 <strong>보존된 최근 4개</strong>(우도·노을 Q&amp;A) 안에 있다.
+    그래서 압축 뒤에도 "방금 얘기한 것"을 정확히 이어간다. <strong>오래된 건 요약으로 접고 최근은 원문으로 남긴다</strong> — 이게 compaction의 정책이고,
+    매 호출 통째로 재전송되는 history를 <code>context window</code> 안에서 <strong>싸게</strong> 유지하는 방법이다.
+  </div>
+
+  <div class="callout note">
+    <strong>실험해 보기.</strong>
+    <ul>
+      <li><code>threshold</code>를 <code>150</code>처럼 더 낮추면 → 더 짧은 대화에도 압축이 <strong>더 자주</strong> 발동한다.</li>
+      <li><code>keep_recent</code>를 <code>4</code> → <code>10</code>으로 키우면 → 보존 구간이 커져 <strong>덜 접힌다</strong>(요약으로 줄어드는 양이 작아진다). 전체 메시지 수(14)에 가까워질수록 접을 옛 메시지가 거의 없어 <strong>압축 효과가 사라진다</strong>.</li>
+      <li>(예고) 클론에서는 이 절차를 <code>class Memory</code>로 감싸 <code>to_messages()</code>가 <strong>알아서</strong> 압축하고, 실제 <code>tool_result</code>가 섞인 history라 <strong>쌍을 안 쪼개는 경계 가드</strong>가 더해진다. 여기 함수(<code>token_estimate</code>/<code>summarize</code>/<code>compact</code>)가 그대로 <code>Memory</code>의 메서드가 된다.</li>
+    </ul>
+  </div>
+
+  <div class="callout warn">
+    <strong>막히면:</strong>
+    <ul>
+      <li><strong>압축이 아예 안 일어난다</strong>(<code>-&gt; 임계 초과</code> 줄이 안 뜸) → 두 경우다. (a) <code>token_estimate</code>가 <code>threshold</code> 이하 → 대화를 더 길게 하거나 <code>threshold</code>를 낮춘다. (b) <code>keep_recent</code>가 전체 메시지 수 이상 → <code>messages[:-keep_recent]</code>(old)가 비어 요약할 게 없다. <code>keep_recent</code>는 <strong>전체보다 작게</strong>.</li>
+      <li><strong>요약 호출에 실수로 <code>tools=</code>를 넘김</strong> → 요약이 엉뚱하게 도구를 부르려 하거나 응답에 <code>tool_use</code> 블록이 섞여 <code>"".join(...text...)</code>이 비게 된다. <code>summarize</code>의 <code>create</code>에는 <strong><code>tools</code>를 넘기지 않는다</strong>(순수 텍스트 요약).</li>
+      <li><code>BadRequestError</code>(400) "first message must use role 'user'" → 압축 후 첫 메시지가 <code>user</code>가 아니다. 이 실습은 요약을 <strong>첫 <code>user</code> 메시지로 prepend</strong>하므로 안전하다 —
+        <code>recent</code>가 <code>assistant</code>로 시작해도 그 <strong>앞의 요약(user)</strong>이 첫 메시지가 된다. 요약을 <code>assistant</code>로 넣지 말 것.</li>
+      <li><strong>요약이 부실해 이어지는 답이 헛돈다</strong>(맥락 유실) → <code>system</code> 프롬프트에 <strong>"이후 대화에 필요한 사실 위주"</strong>를 지시한다. 요약은 <strong>손실 압축</strong>이라 디테일 일부는 사라진다 — 그래서 <strong>최근 <code>keep_recent</code>개는 원문으로 보존</strong>한다.</li>
+      <li><code>token_estimate</code>가 <code>TypeError</code> → <code>content</code>가 문자열이 아니라 블록 리스트/dict일 때 <code>len(content)</code>를 직접 부르면 깨진다. <code>_text_of</code>로 <code>str()</code>을 감싼다(이 실습은 순수 텍스트라 안 나지만, 도구가 섞이는 클론을 위한 습관).</li>
+      <li><strong>토큰이 딱 맞지 않는다</strong> → <code>token_estimate</code>는 <code>문자수 // 4</code> <strong>추정</strong>이다. 정확값(<code>count_tokens</code>)과 다르다 — 가드용이라 그래도 된다. "정확히 몇 토큰"을 기대하지 말 것.</li>
+      <li><code>AuthenticationError</code>(401) → <code>ANTHROPIC_API_KEY</code> 미설정/오타. <code>echo $ANTHROPIC_API_KEY</code>로 확인(step1은 API를 안 부르니 키 없이도 됨).</li>
+    </ul>
+  </div>
+</section>
+
+        <!-- ========== Hermes 만들기 ========== -->
+<section class="module-section" id="clone">
+  <h2>Hermes 만들기</h2>
+  <p>이번 단계: <em>M3 <code>agent.py</code>가 매 스텝 <code>.append</code>하며 <strong>무한정 키우던</strong>
+    <code>self.messages</code>(평범한 list)를 <strong>새 파일 <code>memory.py</code>의 <code>class Memory</code>로 교체</strong>한다.</em>
+    M3 <code>__init__</code>에 달아 둔 주석 <q>이 <code>self.messages</code>가 M4에서 <code>Memory</code> 객체로 교체될 자리다</q>를
+    <strong>회수하는 모듈</strong>이다. 개념↔코드 매핑 한 줄: 개념의 <strong>대화 메모리</strong> = <code>class Memory</code>,
+    <strong>토큰 추정</strong> = <code>token_estimate()</code>, <strong>context window가 차기 전에 줄인다</strong> =
+    <code>to_messages()</code>의 <code>if … &gt; threshold: compact()</code>, <strong>최근은 남기고 오래된 건 요약</strong> =
+    <code>compact()</code>의 <code>recent</code> 보존 + <code>_summarize(old)</code>.</p>
+
+  <div class="callout note">
+    <strong>전제:</strong> M3까지 만든 <code>clone-project/hermes/</code>(<code>config.py</code>, <code>llm.py</code>,
+    <code>tools.py</code>, <strong><code>agent.py</code>의 <code>class Hermes</code></strong>, REPL <code>__main__.py</code>) 위에 더한다.
+    이번엔 <strong>새 파일 <code>memory.py</code></strong>를 만들고, <code>config.py</code>에 상수 둘을 <em>추가</em>,
+    <code>agent.py</code>에서 <code>self.messages</code>를 <code>self.memory</code>로 <em>교체</em>한다.
+    <strong><code>llm.py</code>·<code>__main__.py</code>·<code>tools.py</code>는 한 글자도 안 건드린다</strong>(캡슐화의 증거 — 뒤에서 확인).
+    참조 해답: <code>clone-project/_solution/04-memory-context/hermes/</code> (막히면 <code>diff</code>로 대조).
+  </div>
+
+  <div class="callout note">
+    <strong>실습과의 관계:</strong> <q>직접 사용해보기</q>에서 순수 텍스트 대화로 눈으로 본
+    <strong>추정 → 임계 초과 → 최근 보존 → 오래된 것 요약 1개로 → 축소</strong>가 여기서도 똑같은 골격이다. 차이는 둘뿐:
+    ① 실습은 한 스크립트에 <code>token_estimate()</code>/<code>compact()</code>를 <strong>함수로 절차적으로 펼쳤지만</strong>,
+    Hermes는 같은 절차를 <code>memory.py</code>의 <strong><code>class Memory</code> 메서드로 캡슐화</strong>하고 <code>agent.py</code>는
+    그걸 <em>쓰기만</em> 한다. ② 클론 history엔 실제 <code>tool_use</code>/<code>tool_result</code> <strong>쌍</strong>이 섞여 있어,
+    실습엔 없던 <strong>경계 가드</strong>(쌍을 안 쪼개기)를 하나 더한다.
+  </div>
+
+  <div class="callout warn">
+    <strong>⚠ 이 <q>메모리</q>는 RAG가 아니다:</strong> 여기서 만드는 <code>Memory</code>는 <strong>방금까지 무슨 대화를 했나</strong>를
+    이어가는 <strong>working memory</strong>(대화 history 관리·요약)다. <strong>내가 모르는 외부 지식을 검색해 넣는
+    RAG(임베딩·유사도 검색)는 M6</strong>이고, 저장·요약이지 벡터 검색이 아니다. 헷갈리지 말 것.
+  </div>
+
+  <h3>M3 → M4: <code>self.messages</code>(list)를 <code>self.memory</code>(<code>Memory</code>)로 (before / after)</h3>
+  <p>지금 무엇을/왜: 이번 모듈에서 <code>agent.py</code>가 바뀌는 건 <strong>딱 다섯 곳, 그중 <em>의미</em>가 바뀌는 건 한 줄</strong>뿐이다.
+    <code>Memory.append</code>를 <code>list.append</code>과 똑같은 사용감으로 만들었기 때문에, <code>.append</code> 3곳은
+    <strong>이름만</strong>(<code>self.messages</code>→<code>self.memory</code>) 바뀌고 로직은 그대로다. 먼저 두 그림을 나란히 보자
+    (개념용 축약 — 실제 타이핑은 아래 <code>1)~3)</code>에서 한다).</p>
+  <pre><code class="language-python"># BEFORE — M3 agent.py::Hermes  (self.messages = 평범한 list · 개념용 축약)
+class Hermes:
+    def __init__(self):
+        self.messages = []                                              # ← 평범한 list (무한정 자람)
+
+    def run(self, user_msg):
+        self.messages.append({"role": "user", "content": user_msg})       # ①
+        while step &lt; MAX_STEPS:
+            resp = client.messages.create(..., messages=self.messages)    # ★ list를 통째로 재전송
+            self.messages.append({"role": "assistant", "content": resp.content})  # ②
+            if resp.stop_reason != "tool_use":
+                return text(resp)
+            tool_results = [ ... run_tool ... ]                           # (M3와 동일 — 손 안 댐)
+            self.messages.append({"role": "user", "content": tool_results})       # ③</code></pre>
+  <pre><code class="language-python"># AFTER — M4 agent.py::Hermes  (self.memory = Memory() · 개념용 축약)
+from .memory import Memory                                                # ← [+] 새 import
+
+class Hermes:
+    def __init__(self):
+        self.memory = Memory()                                          # ← [] → Memory()
+
+    def run(self, user_msg):
+        self.memory.append({"role": "user", "content": user_msg})         # ① 이름만
+        while step &lt; MAX_STEPS:
+            resp = client.messages.create(..., messages=self.memory.to_messages())  # ★ 유일한 '의미' 변경 — 여기서 압축 자동 발동
+            self.memory.append({"role": "assistant", "content": resp.content})   # ② 이름만
+            if resp.stop_reason != "tool_use":
+                return text(resp)
+            tool_results = [ ... run_tool ... ]                           # (M3와 '완전히 동일')
+            self.memory.append({"role": "user", "content": tool_results})         # ③ 이름만</code></pre>
+  <p>교체 포인트는 다섯이다:</p>
+  <ol>
+    <li><strong><code>self.messages = []</code> → <code>self.memory = Memory()</code></strong> + <code>from .memory import Memory</code>.
+      history 소유 형태가 <em>list</em> → <em>자기 크기를 알고 스스로 줄이는 객체</em>로.</li>
+    <li><strong><code>.append</code> 3곳(①②③)은 이름만</strong> <code>self.messages</code>→<code>self.memory</code>.
+      규칙(assistant를 통째로 append / <code>tool_result</code>는 user 턴)은 M2~M3 <strong>그대로</strong>다.</li>
+    <li><strong><code>messages=self.messages</code> → <code>messages=self.memory.to_messages()</code> (유일한 의미 변경):</strong>
+      평소엔 내부 리스트를 그대로 돌려주지만, <strong>토큰 추정이 임계를 넘으면 그 자리에서 <code>compact()</code></strong>가 돈다.
+      agent loop 코드는 압축을 <strong>몰라도 된다</strong>(캡슐화).</li>
+    <li><strong><code>tool_results</code> 수집·종료 분기·<code>MAX_STEPS</code> 가드는 M3와 100% 동일</strong> — 손대지 않는다.</li>
+    <li><strong><code>llm.py</code>·<code>__main__.py</code>·<code>tools.py</code>는 무변경.</strong> 진입점을 안 건드리고 메모리를 붙인 것 자체가 캡슐화의 증거.</li>
+  </ol>
+  <div class="callout why">
+    <strong>왜 압축이 <code>to_messages()</code> <em>안에서만</em> 도는가:</strong> agent loop에서 <code>create()</code>가 불리는 시점은 항상
+    <strong>직전 스텝의 <code>tool_result</code>까지 history에 다 넣은 뒤</strong>다(맨 처음은 user 직후). 즉 <code>to_messages()</code>가
+    불리는 순간 history의 <strong>꼬리는 언제나 쌍이 완결</strong>돼 있어, 압축은 앞쪽만 안전하게 접으면 된다.
+    그래서 압축 훅 지점을 <strong>오직 <code>to_messages()</code> 하나</strong>로 둔다(append 도중, 쌍이 미완인 순간엔 안 건드린다).
+  </div>
+
+  <h3>1) hermes/config.py — <code>COMPACT_THRESHOLD</code> · <code>KEEP_RECENT</code> 추가</h3>
+  <p>지금 무엇을/왜: 압축을 <strong>언제</strong> 발동할지(임계)와 <strong>얼마나</strong> 남길지(최근 보존 수)를 상수로 둔다
+    — M3의 <code>MAX_STEPS</code>와 같은 자리(대문자 상수). <code>config.py</code> 맨 아래에 이어서 추가한다.</p>
+  <pre><code class="language-python"># hermes/config.py  (맨 아래에 이어서 추가)
+
+# M4 — Memory &amp; Context: compaction(대화 요약 압축)용 상수
+# COMPACT_THRESHOLD는 학습용으로 일부러 낮췄다 — 실제 claude-sonnet-4-6의
+# context window는 1M tokens라 이 정도로는 안 터진다. 낮춰야 압축이 눈에 보인다.
+COMPACT_THRESHOLD = 4000      # token_estimate가 이 값을 넘으면 compaction 발동
+KEEP_RECENT = 6               # compaction 시 보존할 최근 메시지 수(그 이전을 요약 1개로)</code></pre>
+  <div class="callout note">
+    <strong>왜 임계를 4000처럼 낮게?</strong> 실제 <code>claude-sonnet-4-6</code>의 context window는 <strong>1M tokens</strong>라, 학습용
+    짧은 세션으로는 절대 안 터진다. 압축이 <strong>도는 걸 눈으로 보려면</strong> 임계를 일부러 낮춰야 한다(실습의
+    <code>threshold = 300</code>과 같은 이유). 관찰이 잘 안 되면 잠깐 <code>800</code>쯤으로 더 낮춰도 된다.
+  </div>
+
+  <h3>2) hermes/memory.py 신설 — <code>class Memory</code> (★ 이 모듈의 핵심)</h3>
+  <p>지금 무엇을/왜: 이 파일이 이번 모듈의 심장이다. M3까지 <code>agent.py</code>가 직접 들던 <code>self.messages</code>(list)를
+    여기 <code>class Memory</code>로 <strong>승격</strong>한다 — <code>list</code>처럼 <code>.append</code>로 쌓되, API로 넘기기 직전에
+    스스로 토큰을 재고(<code>token_estimate</code>) 넘치면 접는다(<code>compact</code>). 조각으로 하나씩 쌓아 가자.</p>
+
+  <p>지금 무엇을/왜: 먼저 파일 머리 — 모듈 설명, import, 그리고 <code>__init__</code>. 요약도 <strong>같은 Claude 클라이언트</strong>로
+    부르므로 <code>llm.py</code>의 <code>client</code>와 <code>config.py</code>의 상수를 <strong>재사용(import)</strong>한다. 새 파일
+    <code>hermes/memory.py</code>를 만들고 아래를 그대로 친다.</p>
+  <pre><code class="language-python"># hermes/memory.py
+"""Hermes의 대화 메모리 — 누적된 history를 소유하고, 너무 길어지면 스스로 압축한다.
+
+M3까지 agent.py가 직접 들던 self.messages(평범한 list)를 이 class Memory로 승격한다.
+list처럼 .append로 쌓되, API로 넘기기 직전(to_messages)에 토큰을 추정해 임계를 넘으면
+오래된 메시지들을 '요약 1개'로 접는다(compaction). append 사용감은 list 그대로라
+agent.py 변경은 최소가 된다."""
+from .llm import client                      # 요약도 같은 Claude 클라이언트로 (재사용)
+from .config import MODEL, COMPACT_THRESHOLD, KEEP_RECENT
+
+
+class Memory:
+    def __init__(self, threshold=COMPACT_THRESHOLD, keep_recent=KEEP_RECENT):
+        self.messages = []              # append-only 로그 — M3의 self.messages가 이 안으로 들어왔다
+        self.threshold = threshold      # 이 추정 토큰 수를 넘으면 compaction
+        self.keep_recent = keep_recent  # 압축해도 최근 이만큼은 원문 그대로 보존</code></pre>
+  <div class="callout note">
+    <strong><code>SYSTEM</code>(persona)을 import하지 않는 이유:</strong> 요약은 <strong>요약 전용 system</strong>으로 부른다(뒤 <code>_summarize</code>).
+    Hermes의 persona <code>SYSTEM</code>은 <code>llm.py</code>의 <code>messages=</code> 밖 별도 슬롯에 그대로 살아 있어
+    <strong>compaction과 무관하게 안 사라진다</strong> — 그래서 <code>Memory</code>는 <code>SYSTEM</code>을 알 필요가 없다.
+  </div>
+
+  <p>지금 무엇을/왜: <code>append</code>(list처럼 쌓기)와 <code>token_estimate</code>(문자 수로 토큰 대충 재기). <code>class Memory</code>
+    안에, <code>__init__</code> 아래에 이어서 작성한다.</p>
+  <pre><code class="language-python"># hermes/memory.py  (class Memory 안에 이어서 — append · token_estimate)
+
+    def append(self, msg):
+        """list.append과 똑같은 사용감 — agent.py는 self.memory.append처럼 쓴다."""
+        self.messages.append(msg)
+
+    def token_estimate(self) -&gt; int:
+        """정확한 토크나이저(count_tokens, 네트워크 왕복) 대신 문자 수 // 4로 근사.
+        가드(임계 판단)에는 이 싼 추정으로 충분하다."""
+        return sum(len(_text_of(m)) for m in self.messages) // 4</code></pre>
+  <div class="callout note">
+    <strong>정의 — <code>token_estimate</code>:</strong> 정확한 토크나이저(<code>client.messages.count_tokens</code>, 네트워크 왕복)를
+    매번 부르는 대신 <strong>문자 수 // 4</strong>로 <q>지금 대략 몇 토큰인가</q>를 즉시 가늠한다(정확한 프로파일링 대신
+    <code>len()</code>으로 크기 재기). 가드(임계 판단)엔 이 정도면 충분하다. <code>_text_of</code>로 감싸는 이유는
+    content가 문자열이 아니라 <strong>블록 리스트/dict</strong>일 수도 있어서다(뒤에서 정의).
+  </div>
+
+  <p>지금 무엇을/왜: <code>to_messages()</code> — <strong>API 전송용 history를 돌려주는 창구</strong>이자
+    <strong>압축이 자동 발동하는 유일한 지점</strong>이다(before/after의 그 <q>의미 있는 한 줄</q>이 이걸 부른다).
+    이어서 작성한다.</p>
+  <pre><code class="language-python"># hermes/memory.py  (class Memory 안에 이어서 — to_messages: ★ 압축 자동 훅)
+
+    def to_messages(self) -&gt; list:
+        """API 전송용 history를 반환한다. ★ 여기서 압축이 자동 발동한다:
+        추정 토큰이 임계를 넘으면 compact()로 오래된 대화를 접은 뒤 반환한다.
+        agent loop는 이 사실을 몰라도 된다(캡슐화)."""
+        if self.token_estimate() &gt; self.threshold:
+            self.compact()
+        return self.messages</code></pre>
+  <div class="callout why">
+    <strong>개념↔코드:</strong> <q>context window가 차기 <em>전에</em> 줄인다</q>가 정확히 이 <code>if self.token_estimate() &gt; self.threshold: self.compact()</code>
+    한 줄이다. <code>agent.py</code>는 <code>messages=self.memory.to_messages()</code>라고만 쓰면 되고, 압축이 필요한지/언제 도는지는
+    <code>Memory</code>가 알아서 판단한다.
+  </div>
+
+  <p>지금 무엇을/왜: <code>compact()</code> — 이 모듈의 <strong>클라이맥스</strong>다. 최근 <code>keep_recent</code>개는 원문 보존,
+    그 이전 오래된 메시지들을 <strong>요약 1개로 대체</strong>한다. 그리고 <strong>★ 경계 가드</strong> — 보존 경계가
+    <code>tool_use</code>/<code>tool_result</code> <strong>쌍</strong>을 쪼개지 않게 한 칸씩 물린다. 이어서 작성한다.</p>
+  <pre><code class="language-python"># hermes/memory.py  (class Memory 안에 이어서 — compact: 최근 보존 + 요약 1개 + 경계 가드)
+
+    def compact(self):
+        """최근 keep_recent개는 원문 보존, 그 이전 오래된 메시지들을 요약 1개로 대체한다."""
+        cut = len(self.messages) - self.keep_recent
+        if cut &lt;= 0:
+            return
+        # ★ 경계 가드: 보존 구간이 tool_result로 시작하면 그 짝 tool_use가 요약에 먹혀
+        # 다음 호출이 400(orphan tool_result)이 난다. 경계를 앞으로 물려 쌍을 안 쪼갠다.
+        while cut &gt; 0 and _is_tool_result_turn(self.messages[cut]):
+            cut -= 1
+        if cut &lt;= 0:
+            return
+        old, recent = self.messages[:cut], self.messages[cut:]
+        summary = self._summarize(old)
+        # 요약은 '첫 user 메시지'로 prepend — history는 늘 user로 시작해야 하니 안전하다.
+        self.messages = [{"role": "user", "content": f"[이전 대화 요약]\n{summary}"}] + recent
+        print(f"  [memory] compaction: {len(old) + len(recent)} msgs → {len(recent) + 1} msgs")</code></pre>
+  <div class="callout warn">
+    <strong>★ 이 모듈의 대표 함정 — 압축이 쌍을 쪼개면 400:</strong> Hermes history엔 <code>tool_use</code>(assistant) ↔
+    <code>tool_result</code>(user) <strong>쌍</strong>이 들어 있다(M2). 경계를 아무 데나 잘라 <strong><code>tool_result</code>만 <code>recent</code>에
+    남고 그 짝 <code>tool_use</code>가 <code>old</code>로 넘어가 요약</strong>돼 버리면, 다음 <code>create</code>가 <strong>400</strong>
+    (orphan tool_result / 짝 없는 tool_use)이다 — M2에서 배운 바로 그 400. 그래서
+    <code>while cut &gt; 0 and _is_tool_result_turn(self.messages[cut]): cut -= 1</code>로 경계를 <strong>쌍 밖으로 물린다</strong>.
+    <em>SDK 400은 값보다 필드·<code>id</code> 매칭·쌍부터 본다</em>는 M2 교훈 그대로.
+  </div>
+  <div class="callout note">
+    <strong>첫 메시지는 왜 <code>user</code>로 prepend?</strong> API 규칙상 history는 <strong>첫 메시지가 <code>user</code></strong>여야 한다
+    (assistant로 시작하면 400). 압축 후 <code>recent</code>가 assistant부터 시작하더라도, 요약을 <strong>항상 첫 <code>user</code> 메시지</strong>
+    <code>{"role":"user", "content":"[이전 대화 요약]\n…"}</code>로 맨 앞에 붙이므로 언제나 안전하다. persona는 이 자리가 아니라
+    <code>system=</code> 슬롯이다.
+  </div>
+
+  <p>지금 무엇을/왜: <code>_summarize</code> — <strong>별도 LLM 호출</strong>로 오래된 로그를 요약한다. 핵심 셋: <strong>tools 없음</strong>,
+    Hermes persona가 아닌 <strong>요약 전용 <code>system</code></strong>, 짧은 <code>max_tokens</code>. 이어서 작성한다.</p>
+  <pre><code class="language-python"># hermes/memory.py  (class Memory 안에 이어서 — _summarize: 별도 LLM 호출)
+
+    def _summarize(self, old) -&gt; str:
+        """오래된 메시지들을 별도 LLM 호출로 요약한다.
+        tools 없음, Hermes persona(SYSTEM)도 아님 — 요약 전용 system을 따로 준다."""
+        log = "\n".join(f"{m['role']}: {_text_of(m)}" for m in old)
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=512,
+            system="다음 대화 로그를 이후 대화에 필요한 사실 위주로 3~5문장으로 간결히 요약해줘.",
+            messages=[{"role": "user", "content": log}],
+        )
+        return "".join(b.text for b in resp.content if b.type == "text")</code></pre>
+
+  <p>지금 무엇을/왜: 마지막으로 <strong>클래스 밖 헬퍼 둘</strong>. <code>_text_of</code>는 content를 안전하게 문자열로(추정·요약용),
+    <code>_is_tool_result_turn</code>은 경계 가드가 쓰는 <q>이 메시지가 <code>tool_result</code> 턴인가</q> 판별기다.
+    파일 맨 아래, <code>class Memory</code> <strong>바깥</strong>에 작성한다.</p>
+  <pre><code class="language-python"># hermes/memory.py  (파일 맨 아래, class Memory 바깥에 — 헬퍼 둘)
+
+
+def _text_of(msg) -&gt; str:
+    """content를 문자열로 — 블록 리스트/dict여도 str()로 안전 직렬화(추정·요약용)."""
+    c = msg["content"]
+    return c if isinstance(c, str) else str(c)
+
+
+def _is_tool_result_turn(msg) -&gt; bool:
+    """이 메시지가 tool_result 턴인가(경계 가드용).
+    content가 블록 리스트이고 그 안에 type == 'tool_result' 블록이 있으면 True.
+    우리가 만든 dict·SDK 객체 둘 다 대응한다."""
+    c = msg["content"]
+    if not isinstance(c, list):
+        return False
+    for b in c:
+        t = b.get("type") if isinstance(b, dict) else getattr(b, "type", None)
+        if t == "tool_result":
+            return True
+    return False</code></pre>
+  <div class="callout note">
+    <strong>왜 <code>_text_of</code>로 감싸나(<code>token_estimate</code> <code>TypeError</code> 예방):</strong> assistant 턴의 content는
+    <strong>SDK 블록 리스트</strong>, <code>tool_result</code> 턴의 content는 <strong>dict 리스트</strong>다 — 여기에 <code>len()</code>을
+    바로 걸면 문자열이 아니라 깨지거나 엉뚱한 값이 나온다. <code>str()</code>로 직렬화하면 리스트/dict든 문자열이든 안전하게
+    길이를 잰다. <code>_is_tool_result_turn</code>이 <code>b.get(...)</code>(dict)과 <code>getattr(...)</code>(SDK 객체)를 둘 다
+    보는 이유도 같다 — history엔 두 형태가 섞여 있다.
+  </div>
+
+  <h3>3) hermes/agent.py 교체 — <code>self.messages</code> → <code>self.memory</code></h3>
+  <p>지금 무엇을/왜: 위 before/after에서 짚은 <strong>다섯 곳만</strong> 고친다. <code>run()</code>의 도구 왕복·종료 분기·가드는
+    <strong>M3와 한 글자도 다르지 않다</strong>. 아래가 교체를 반영한 <code>agent.py</code> 전체다 — 새로 짜는 게 아니라
+    <em>그 다섯 곳만</em> 고친다는 눈으로 보라(주석의 <code>M4</code>/<code>self.memory</code> 표시가 바뀐 지점).</p>
+  <pre><code class="language-python"># hermes/agent.py
+"""Hermes 본체 — agent loop(ReAct)를 담은 class Hermes.
+
+M2 llm.chat_with_tools 의 도구 1-step 왕복(if)을 while 루프로 '승격'한 것.
+도구 왕복 4단계·tool_use_id 매칭은 M2와 완전히 동일하고, 그 왕복을
+'stop_reason 이 tool_use 가 아닐 때까지 반복'으로 감쌌을 뿐이다.
+
+M4: history 소유 형태를 평범한 list(self.messages)에서 self.memory(class Memory)로
+교체했다. 로직이 바뀌는 건 딱 한 줄 — messages=self.memory.to_messages() — 이고,
+거기서 토큰 추정이 임계를 넘으면 오래된 대화가 요약 1개로 압축(compaction)된다."""
+from .llm import client, SYSTEM
+from .config import MODEL, MAX_TOKENS, MAX_STEPS
+from .tools import TOOLS, run_tool
+from .memory import Memory
+
+
+class Hermes:
+    def __init__(self):
+        # M3까진 self.messages = [] (평범한 list)였다. M4에서 그 자리를 Memory로 교체 —
+        # 자기 크기를 알고(token_estimate) 스스로 줄이는(compact) 객체가 history를 소유한다.
+        self.memory = Memory()
+
+    def run(self, user_msg: str) -&gt; str:
+        """user_msg를 받아, stop_reason이 tool_use가 아닐 때까지 도구를 반복 실행한다.
+        while 한 바퀴 = ReAct 한 사이클(추론→행동→관찰). MAX_STEPS로 무한 루프를 막는다."""
+        self.memory.append({"role": "user", "content": user_msg})
+
+        step = 0
+        while step &lt; MAX_STEPS:                 # ← M2의 if를 감싼 while + 무한 루프 가드
+            step += 1
+            # 매 스텝: history를 통째로 재전송(M1 stateless). 단, to_messages()가 그 순간
+            # 토큰을 추정해 임계를 넘으면 오래된 대화를 요약 1개로 접어(compact) 돌려준다.
+            resp = client.messages.create(
+                model=MODEL,
+                max_tokens=MAX_TOKENS,
+                system=SYSTEM,
+                tools=TOOLS,
+                messages=self.memory.to_messages(),
+            )
+            # assistant 응답을 '통째로' append (tool_use 블록 보존).
+            # M2에선 두 분기에 각각 있던 걸, 여기선 루프 상단 1회로 합쳤다.
+            self.memory.append({"role": "assistant", "content": resp.content})
+
+            # 종료 분기 — M2 chat_with_tools의 '그 테스트' 그대로.
+            # tool_use가 아니면(end_turn/max_tokens/refusal) 최종 답으로 종료.
+            if resp.stop_reason != "tool_use":
+                return "".join(b.text for b in resp.content if b.type == "text")
+
+            # 여기부터는 M2와 '완전히 동일' — tool_use 블록마다 실행해 tool_result 수집.
+            tool_results = []
+            for block in resp.content:
+                if block.type == "tool_use":
+                    print(f"  ↳ step {step}: {block.name}({block.input})")  # 루프가 도는 걸 눈으로
+                    result = run_tool(block.name, block.input)   # 우리가 실행
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,   # tool_use 의 id와 반드시 매칭
+                        "content": result,          # 반드시 문자열
+                    })
+            # 결과를 user 턴으로 회신하고 루프 top으로 → M2의 '2차 호출'을 루프가 대체.
+            self.memory.append({"role": "user", "content": tool_results})
+
+        # MAX_STEPS까지 돌아도 안 끝났다 → 강제 종료(가드 탈출).
+        return "[max_steps 도달 — 루프를 강제 종료했어요]"</code></pre>
+  <div class="callout warn">
+    <strong>M3와의 diff 주의(딱 이만큼):</strong> ① <code>from .memory import Memory</code> 한 줄 추가.
+    ② <code>__init__</code>의 <code>self.messages = []</code> → <code>self.memory = Memory()</code>(주석도 갱신).
+    ③ <code>run()</code>의 <code>self.messages.append(…)</code> <strong>3곳</strong>을 <code>self.memory.append(…)</code>로.
+    ④ <code>messages=self.messages</code> → <code>messages=self.memory.to_messages()</code>(유일한 의미 변경).
+    그 밖엔 한 글자도 안 바뀐다.
+  </div>
+
+  <h3>4) 무변경 확인 — <code>llm.py</code> · <code>__main__.py</code> · <code>tools.py</code></h3>
+  <p>지금 무엇을/왜: <strong>메모리를 붙였는데 진입점·LLM 래퍼·도구는 안 건드린다</strong> — 이게 <code>Memory</code> 캡슐화의 증거다.
+    <code>Memory</code>가 <code>client</code>를 스스로 import하고, <code>Hermes()</code>는 여전히 무인자 생성이라
+    <code>__main__.py</code>의 <code>hermes = Hermes(); hermes.run(user)</code>가 그대로 돈다. 세 파일 모두 <strong>수정 없음</strong>.
+    (혹시 M3에서 <code>__main__</code>이 직접 <code>messages</code>를 들고 있었다면 M3에서 이미 없앴어야 한다 — history는 M3부터
+    <code>Hermes</code> 소유다.)</p>
+
+  <h3>돌려보기</h3>
+  <p>긴 세션을 만들어 압축이 <strong>실제로 도는지</strong> 본다 — 큰 <code>read_file</code>을 몇 번 섞어 history를 부풀린다.</p>
+  <pre><code class="language-bash">cd clone-project
+uv run python -m hermes</code></pre>
+  <pre class="output">Hermes REPL — 빈 입력 또는 'exit'로 종료 (이제 도구를 여러 스텝 이어 쓴다)
+
+you&gt; README.md 전체를 읽고 요약해줘
+  ↳ step 1: read_file({'path': 'README.md'})
+hermes&gt; README.md는 Hermes 클론 프로젝트 안내로 … (요약)
+you&gt; hermes 폴더의 .py 파일들을 각각 읽고 무슨 역할인지 정리해줘
+  ↳ step 1: run_bash({'cmd': 'ls hermes/*.py'})
+  ↳ step 2: read_file({'path': 'hermes/agent.py'})
+  ↳ step 3: read_file({'path': 'hermes/tools.py'})
+  [memory] compaction: 9 msgs → 7 msgs
+  ↳ step 4: read_file({'path': 'hermes/memory.py'})
+hermes&gt; agent.py는 agent loop, tools.py는 도구, memory.py는 대화 메모리… (정상 응답)
+you&gt; 방금 정리한 것 중 memory.py 역할만 한 줄로
+hermes&gt; memory.py는 대화 history를 누적·요약 압축하는 class Memory예요.
+you&gt; exit
+bye.</pre>
+  <p>핵심은 중간의 <code>[memory] compaction: 9 msgs → 7 msgs</code> 한 줄이다 — history 추정 토큰이
+    <code>COMPACT_THRESHOLD</code>를 넘는 순간 <code>to_messages()</code>가 <code>compact()</code>를 불러 오래된 메시지들이
+    <strong>요약 1개로 접혔고</strong>, 그 뒤에도 <strong>최근 맥락으로 대화가 정상적으로 이어진다</strong>(마지막 질문에 여전히 답함).
+    잘 안 뜨면 <code>COMPACT_THRESHOLD</code>를 잠깐 <code>800</code>쯤으로 낮추면 금방 관찰된다.
+    (모델이 고르는 명령·스텝 수·압축 시점은 매번 조금 다르다 — 숫자는 예시.)</p>
+  <div class="callout why">
+    <strong>개념↔코드 매핑(한눈에):</strong>
+    <ul>
+      <li><strong>대화 메모리</strong> = <code>class Memory</code> / <strong>토큰 추정</strong> = <code>token_estimate()</code>(문자수//4).</li>
+      <li><strong>context window가 차기 전에 줄인다</strong> = <code>to_messages()</code>의 <code>if … &gt; threshold: compact()</code>.</li>
+      <li><strong>최근은 남기고 오래된 건 요약</strong> = <code>compact()</code>의 <code>recent</code> 보존 + <code>_summarize(old)</code>(별도 LLM 호출).</li>
+      <li><strong>쌍을 안 쪼갠다</strong>(함정 방어) = 경계 가드 <code>while … _is_tool_result_turn: cut -= 1</code>.</li>
+      <li><strong>persona는 안 사라진다</strong> = <code>system=SYSTEM</code>이 <code>messages</code> 밖이라 compaction과 무관.</li>
+    </ul>
+  </div>
+
+  <div class="callout warn">
+    <strong>막히면:</strong>
+    <strong>압축 경계 400(★ 대표 함정)</strong> — 경계가 <code>tool_use</code>/<code>tool_result</code> 쌍을 쪼개면 다음 <code>create</code>가
+    <strong>400</strong>(orphan tool_result / 짝 없는 tool_use). 경계 가드(<code>_is_tool_result_turn</code>로 물러나기)가 있는지 확인.
+    <strong>첫 메시지가 assistant(400)</strong> — 요약을 <strong>첫 <code>user</code> 메시지로 prepend</strong>하는지 확인(그러면 항상 user로 시작 → 안전).
+    <strong>매 스텝 요약이 돌아 느림/비쌈</strong> — 임계가 너무 낮거나 <code>KEEP_RECENT</code>가 커서 <em>압축 후에도 계속 임계 초과</em>면
+    매 스텝 <code>_summarize</code>가 돈다. 임계를 보존 구간 예상 크기보다 넉넉히(정상 설정에선 <strong>가끔만</strong> 발동).
+    <strong><code>token_estimate</code> <code>TypeError</code></strong> — content가 문자열이 아닌 블록 리스트/dict일 때 <code>len()</code>을 바로 걸면 깨진다 →
+    <code>_text_of</code>로 <code>str()</code> 감싸기.
+    <strong>요약이 대화를 망침(맥락 유실)</strong> — 요약 프롬프트에 <q>이후 대화에 필요한 사실 위주</q> 지시(품질 튜닝 심화는 범위 밖).
+    <strong>RAG로 착각</strong> — 이건 임베딩/검색이 아니라 <strong>대화 요약</strong>이다(→ M6).
+    그래도 막히면 <code>diff hermes/memory.py _solution/04-memory-context/hermes/memory.py</code>로 정답과 대조한다.
+  </div>
+
+  <div class="callout note">
+    <strong>지금 Hermes의 한계 = 다음 모듈의 동기:</strong>
+    ① 요약은 <strong>손실 압축</strong>이다 — 오래된 대화의 디테일은 요약되며 사라진다(필요한 사실만 남긴다).
+    ② Hermes는 아직 <strong>자기가 모르는 외부 지식을 검색해 오지 못한다</strong> — 로컬 문서를 <strong>검색</strong>해 답의 근거로 넣는
+    <strong>RAG는 M6</strong>다(이 <code>Memory</code>는 대화 요약이지 벡터 검색이 아님을 다시 확인).
+    ③ 목표를 스스로 쪼개 계획하고, <code>run_bash</code> 같은 위험 도구를 실행 전에 <strong>묻는</strong> 것은 아직 못 한다.
+  </div>
+
+  <p><strong>메모리 관리 완성.</strong> Hermes는 이제 긴 세션에도 스스로 토큰을 재고 오래된 대화를 요약으로 압축한다 —
+    다음 <strong>M5 · Planning &amp; Autonomy</strong>에서는 목표를 스스로 계획(<code>update_plan</code>)하고,
+    <code>write_file</code>·<code>run_bash</code> 같은 위험 도구를 실행 전에 사용자에게 묻는 <strong>승인 게이트</strong>를 붙인다.</p>
+</section>
+
+        <!-- ========== 이번 모듈 질문 (qa-log 자동 렌더) ========== -->
+        <section class="module-section" id="questions">
+          <h2>이번 모듈 질문</h2>
+          <div id="moduleQa" class="qa-list"><p class="hint">학습 중 궁금한 점을 물어보면 여기에 기록됩니다.</p></div>
+        </section>
+
+        <nav class="module-nav">
+          <a class="prev" href="03-agent-loop.html">← 3. The Agent Loop</a>
+          <a class="next" href="../index.html">다음: 5. Planning &amp; Autonomy →</a>
+        </nav>
+      </article>
+    </main>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../assets/app.js"></script>
+</body>
+</html>
