@@ -60,7 +60,7 @@
       "title": "Planning & Autonomy",
       "summary": "목표 분해, plan 도구, 자율 실행, 위험 도구 승인 게이트(guardrail)",
       "flavor": "자율",
-      "status": "planned",
+      "status": "done",
       "terms": ["planning", "autonomy", "guardrail", "approval gate"],
       "running_example": "plan 먼저 세우고 위험 도구는 승인 후 실행"
     },

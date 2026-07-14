@@ -1,0 +1,1320 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>5. Planning &amp; Autonomy — Hermes 과정</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body data-page="module" data-slug="05-planning-autonomy">
+  <header class="site-header">
+    <a class="brand" href="../index.html">🛰️ Hermes 과정</a>
+    <button id="navToggle" class="nav-toggle" aria-label="목차 열기">☰</button>
+    <span class="crumb">5. Planning &amp; Autonomy</span>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" id="sidebar"><!-- app.js 가 curriculum.json 으로 채움 --></aside>
+
+    <main class="content">
+      <article class="module">
+        <p class="eyebrow">모듈 5</p>
+        <h1>Planning &amp; Autonomy</h1>
+
+        <!-- ========== 개념 ========== -->
+<section class="module-section" id="concept">
+  <h2>개념</h2>
+  <p>M3에서 우리는 <code>class Hermes</code>에 agent loop를 만들고, <code>run_bash</code>라는 도구를 쥐여 줬다.
+    그때 <code>tools.py</code>에 이런 주석을 달아 뒀다 — <em>"⚠️ 위험 … 실행 전 사용자 승인(승인 게이트)은
+    <strong>M5에서 추가한다</strong>."</em> <strong>이번 모듈이 그 약속을 회수한다.</strong>
+    (M4가 <code>agent.py</code>의 "여기가 <code>Memory</code> 자리" 주석을 회수했던 것과 같은 구조다.)</p>
+
+  <p>지금의 Hermes를 냉정하게 보면 결함이 <strong>두 개</strong> 있다.</p>
+  <ul>
+    <li><strong>계획이 없다.</strong> 목표를 받으면 <strong>매 스텝 즉흥적으로</strong> 다음 도구를 고른다. 멀티스텝은 하지만,
+      그 계획은 <strong>모델의 머릿속에만</strong> 있고 우리는 무슨 일이 벌어질지 <strong>실행되기 전엔 모른다</strong>.</li>
+    <li><strong>묻지 않는다.</strong> M3의 루프는 <code>run_tool(block.name, block.input)</code>을 <strong>그냥 부른다</strong>.
+      모델이 <code>run_bash("rm -rf …")</code>를 한 번 내면 그대로 돈다. 손발은 다 쥐여 줬는데 <strong>브레이크가 없다</strong>.</li>
+  </ul>
+
+  <p>M5는 이 둘에 각각 하나씩 붙인다 — ① <strong><code>update_plan(steps)</code></strong>: 모델이 목표를 하위 단계로 쪼개
+    <strong>계획을 밖으로 꺼내</strong> 놓게 한다. ② <strong>승인 게이트</strong>: 되돌리기 어려운 도구는
+    <strong>실행 직전에 사람에게 y/n을 묻는다</strong>. running example은 세 섹션이 공유한다 —
+    <strong>"plan 먼저 세우고, 위험 도구는 승인 후 실행"</strong>. 그리고 이 모듈의 진짜 클라이맥스는 따로 있다:
+    <strong>사람이 거부해도 루프가 깨지지 않는다</strong>. 왜 안 깨지는지가 M5의 핵심이다.</p>
+
+  <div class="callout note">
+    <strong>표기 규약(★ 세 섹션 공통):</strong> <strong>개념·패턴</strong>은 원어/한글로 —
+    <strong>planning</strong>/"계획", <strong>autonomy</strong>/"자율성", <strong>guardrail</strong>/"가드레일",
+    <strong>approval gate</strong>/"승인 게이트", <strong>human-in-the-loop</strong>, "거부(deny)", "관찰(observation)".
+    <strong>코드·식별자·API 값</strong>은 코드 표기로 — <code>update_plan</code>, <code>steps</code>, <code>self.plan</code>,
+    <code>DANGEROUS_TOOLS</code>, <code>confirm()</code>, <code>DENIED_MSG</code>, <code>is_error</code>, <code>run_tool</code>.
+    헷갈리기 쉬운 쌍을 미리 갈라 둔다 — 개념 <strong>"계획"</strong> vs 도구 <code>update_plan</code> vs 상태 <code>self.plan</code> /
+    개념 <strong>"승인 게이트"</strong> vs 함수 <code>confirm()</code> vs 집합 <code>DANGEROUS_TOOLS</code> /
+    개념 <strong>"거부"</strong> vs 필드 <code>is_error: True</code>.
+  </div>
+
+  <h3>planning — 목표를 단계로 쪼갠다</h3>
+  <div class="callout note">
+    <strong>정의 — planning(계획):</strong> 에이전트가 <strong>목표를 실행 가능한 하위 단계 목록으로 분해</strong>하고,
+    그 계획을 <strong>명시적인 상태로 유지</strong>하는 것. 비유하면 함수 하나로 다 처리하지 않고
+    <strong>작업을 체크리스트/작업 큐로 쪼개 놓는 것</strong> — 또는 코드를 짜기 전에 주석으로 단계를 먼저 적어 두는 습관.
+  </div>
+  <p>M3~M4의 Hermes도 여러 스텝을 밟긴 했다. 차이는 <strong>계획이 어디에 있느냐</strong>다.
+    즉흥 실행에서는 계획이 <strong>모델의 머릿속(=그때그때의 추론)</strong>에만 있어서, 스텝이 길어질수록 방향이 흔들리고
+    우리는 실행 로그를 보고 <strong>사후에</strong> 무슨 일이 있었는지 짐작할 뿐이다.
+    M5는 그 계획을 <strong>리스트 하나로 꺼내</strong> 들고 있는다.</p>
+  <pre class="output">you&gt; 작업 폴더의 임시 로그 파일(.log)을 정리해줘
+  [plan] 3단계
+    1. 파일 목록 확인
+    2. .log 파일 고르기
+    3. 각각 삭제
+  ↳ step 2: list_files({})                          ← 안전(읽기만) → 묻지 않고 자동 실행
+  ↳ step 3: delete_file({'path': 'temp1.log'})
+  [승인 요청] delete_file({'path': 'temp1.log'})     ← 위험(되돌릴 수 없다) → 여기서 멈춘다
+  실행할까요? [y/N]</pre>
+  <p>이게 M5의 running example이다. 개념·실습은 같은 소재를 쓴다 — <code>list_files</code>·<code>delete_file</code>은
+    <strong>부작용 0인 가짜 도구</strong>라 마음껏 y도 n도 눌러 볼 수 있다. 클론에서는 같은 골격을
+    <strong>진짜 <code>run_bash</code>·<code>write_file</code></strong>로 돌려 본다.</p>
+
+  <h3><code>update_plan</code>은 마법이 아니다 (★)</h3>
+  <p>여기서 대부분의 입문자가 헛짚는다. <code>update_plan</code>은 <strong>모델을 똑똑하게 만드는 도구가 아니다</strong>.
+    이 도구가 하는 일은 <strong>부작용이 하나도 없다</strong> — 파일도 안 건드리고, 셸도 안 돌리고, 네트워크도 안 탄다.
+    전부 세 줄이면 끝난다.</p>
+  <pre><code class="language-python">def _update_plan(self, steps: list) -&gt; str:
+    self.plan = steps                       # ① 우리 쪽 변수에 저장한다 (에이전트 자신의 상태)
+    print(f"  [plan] {len(steps)}단계")      # ② 화면에 찍는다 (우리가 본다)
+    for i, s in enumerate(steps, 1):
+        print(f"    {i}. {s}")
+    return f"계획 저장됨: {len(steps)}단계"   # ③ 문자열을 돌려준다 (모델이 본다)
+    # ⚠ 반환은 반드시 '문자열'. len(steps)(숫자)를 그대로 리턴하면 tool_result content 규칙 위반 → 400 (M2)</code></pre>
+  <p>저장하고, 출력하고, 문자열 하나 돌려준다. 그게 전부다. 되돌릴 게 없으니 <strong>승인을 물을 이유도 없다</strong>
+    (그래서 <code>DANGEROUS_TOOLS</code>에 안 들어간다). 그런데도 효과가 있다.</p>
+  <div class="callout why">
+    <strong>왜 이 '아무것도 안 하는 도구'가 효과가 있나 — 두 가지뿐이다:</strong>
+    <strong>① 생각의 외부화(externalize).</strong> 모델이 계획을 <strong>말로 뱉는 행위 자체</strong>가 <code>tool_use</code>/<code>tool_result</code>로
+    history에 남고, 그 history는 M1의 stateless 원리대로 <strong>다음 스텝마다 다시 모델에게 전송</strong>된다.
+    적어 둔 계획이 계속 눈앞에 있으니 이후 스텝이 덜 흔들린다.
+    <strong>② 관찰 가능성.</strong> <strong>우리가</strong> 에이전트가 뭘 하려는지 <strong>실행되기 전에</strong> 볼 수 있다.
+    "도구가 똑똑해서"가 아니라 <strong>"생각을 밖에 적어 두면 안 흔들려서"</strong>다.
+  </div>
+  <div class="callout warn">
+    <strong>비유의 한계(체크리스트):</strong> 체크리스트는 보통 <strong>실행 엔진이 순서대로 소비</strong>하지만,
+    <code>self.plan</code>은 <strong>아무도 강제로 실행하지 않는다</strong>. 그냥 파이썬 리스트다.
+    계획을 세웠다고 모델이 그대로 따른다는 <strong>보장은 없다</strong> — 모델을 실제로 움직이는 건 history에 남은
+    <code>update_plan</code> 호출과 그 결과일 뿐이다. 계획 단계를 <strong>코드가 순차 실행</strong>하는 executor형 planner는
+    <strong>다른 설계</strong>이고 이 모듈의 범위 밖이다.
+  </div>
+  <p>구현 위치에도 규칙이 있다. <code>read_file</code>·<code>write_file</code>·<code>run_bash</code>는 <strong>바깥 세상</strong>을 바꾸므로
+    <code>tools.py</code>에 산다. 반면 <code>update_plan</code>이 바꾸는 <code>self.plan</code>은 <strong>에이전트 자신의 상태</strong>다 —
+    M4의 <code>self.memory</code>와 같은 부류다. 그래서 <strong>스키마(모델과의 계약)는 <code>tools.py</code>의 <code>TOOLS</code>에</strong> 두되,
+    <strong>핸들러는 <code>agent.py</code>가 직접</strong> 처리한다(<code>run_tool</code> 디스패처에 넣지 않는다).
+    이 원칙은 잠시 뒤 승인 게이트에서 다시 나온다.</p>
+
+  <h3>autonomy — 엔진은 이미 M3에 있다</h3>
+  <div class="callout note">
+    <strong>정의 — autonomy(자율성):</strong> 사람이 매 행동을 지시하지 않아도, 에이전트가 <strong>스스로 다음 행동을 정해 실행</strong>하는 정도.
+    <strong>on/off가 아니라 다이얼</strong>이다. 비유하면 <strong>스스로 도는 데몬/크론</strong> — 단, 이 프로세스는
+    다음에 무엇을 할지<strong>까지</strong> 스스로 고른다.
+  </div>
+  <p>중요한 사실: <strong>자율성의 엔진은 M5가 새로 만드는 게 아니다.</strong> 이미 M3의 agent loop가 그 엔진이다 —
+    <code>stop_reason</code>이 <code>tool_use</code>인 동안 계속 돌면서 모델이 고른 도구를 실행하고 결과를 되먹인다.
+    M5가 더하는 건 엔진이 아니라 <strong>방향</strong>(먼저 계획하라)과 <strong>한계</strong>(위험한 건 묻고 하라)다.</p>
+  <div class="callout warn">
+    <strong>비유의 한계(데몬/크론):</strong> 크론은 <strong>정해진 명령을 정해진 시각에</strong> 돌린다 — 무엇을 할지 우리가 안다.
+    agent loop는 <strong>다음 행동을 모델이 고른다</strong> — 그래서 <strong>무엇을 할지 미리 알 수 없다</strong>.
+    자율성이 유용한 이유이자, 그 자율성에 <strong>가드레일이 필요한 이유</strong>다.
+  </div>
+
+  <h3>guardrail — 부탁이 아니라 강제</h3>
+  <div class="callout note">
+    <strong>정의 — guardrail(가드레일):</strong> 에이전트가 <strong>넘지 말아야 할 경계를 코드로 강제</strong>하는 장치.
+    모델이 착하게 굴어 주기를 기대하는 게 아니라, <strong>우리 코드가 막는다</strong>.
+    비유하면 <strong>서버 측 입력 검증 / 권한 체크</strong> — 클라이언트를 믿지 않는 그 태도 그대로다.
+    여기서 <strong>클라이언트가 곧 모델</strong>이고, <strong>우리는 서버</strong>다.
+  </div>
+  <p>이 대비가 M5 전체를 관통한다. <code>llm.py</code>의 <code>SYSTEM</code>에
+    <em>"되돌리기 어려운 도구는 사용자 승인이 필요하다"</em>라고 적는 것은 <strong>부탁</strong>이다 — 모델은 확률적이라 안 지킬 수 있다.
+    반면 <code>agent.py</code>의 <code>if block.name in DANGEROUS_TOOLS:</code>는 <strong>강제</strong>다 — 모델이 무슨 생각을 하든
+    그 줄을 통과하지 않고는 도구가 실행되지 않는다. <strong>경계는 프롬프트가 아니라 코드에 있어야 한다.</strong></p>
+  <div class="callout why">
+    <strong>그럼 <code>SYSTEM</code>의 그 문장은 왜 쓰나:</strong> 강제가 아니라 <strong>협조를 유도</strong>하려고 쓴다 —
+    미리 계획을 세우게 하고, 거부당했을 때 같은 도구를 억지로 재시도하지 않게 한다.
+    M4에서 배운 대로 <code>system</code>은 history 밖 슬롯이라 <strong>compaction에도 안 사라지는 항구 규칙</strong>이다.
+    <strong>M5는 그 슬롯이 '말투'를 넘어 '행동 정책'이 되는 첫 모듈</strong>이다. 다만 정책은 부탁이고,
+    <strong>강제는 게이트(코드)가 한다</strong>. 둘은 역할이 다르고, 둘 다 있어야 한다.
+  </div>
+  <div class="callout warn">
+    <strong>비유의 한계(서버 검증):</strong> 서버 검증은 보통 <strong>입력의 형식</strong>을 본다. 가드레일이 보는 건 형식이 아니라
+    <strong>행동</strong> — "어떤 도구를 어떤 인자로 부르려 하는가"다. 그리고 악의적인 클라이언트를 막는 게 아니라,
+    <strong>선의지만 확률적으로 틀리는</strong> 클라이언트를 막는다.
+  </div>
+
+  <h3>승인 게이트는 '루프'에 둔다</h3>
+  <div class="callout note">
+    <strong>정의 — approval gate(승인 게이트) = human-in-the-loop:</strong>
+    <strong>되돌리기 어려운 행동을 실행하기 직전에 사람의 승인을 받는</strong> 지점.
+    agent loop의 <strong>'행동' 단계 바로 앞</strong>에 끼운다. 비유하면 <strong>프로덕션 배포 승인 단계</strong>,
+    <code>rm -i</code>, PR 머지 게이트 — 자동화 파이프라인 한가운데에 사람을 한 명 세워 두는 것.
+  </div>
+  <p>M3의 ReAct는 <strong>추론 → 행동 → 관찰</strong>이었다. 그 '행동' 단계가 코드에서 물리적으로 존재하는 곳은
+    <code>agent.py</code>의 <code>run_tool(block.name, block.input)</code> 호출 <strong>바로 그 줄</strong>이다.
+    승인 게이트는 <strong>정확히 그 앞</strong>에 들어간다 — 개념(human-in-the-loop)과 코드(루프의 실행 직전)가 1:1로 맞는다.</p>
+  <pre><code class="language-python">DANGEROUS_TOOLS = {"delete_file"}     # 개념·실습 소재. 클론에선 {"write_file", "run_bash"}
+
+def confirm(name: str, tool_input: dict) -&gt; bool:
+    """위험 도구 실행 '직전'에 사람에게 y/n을 묻는다."""
+    print(f"  [승인 요청] {name}({tool_input})")
+    try:
+        answer = input("  실행할까요? [y/N] ").strip().lower()
+    except EOFError:      # 파이프·CI 등 비대화형이라 물어볼 수가 없다
+        return False      # → 거부. 못 물으면 안 한다 (fail-closed)
+    return answer == "y"  # 기본값은 거부 — 그냥 Enter를 치면 False
+
+
+# --- agent loop 안, run_tool 호출 '직전' ---
+for block in resp.content:
+    if block.type == "tool_use":
+        if block.name in DANGEROUS_TOOLS and not confirm(block.name, block.input):
+            ...           # 거부 처리 (바로 다음 절)
+            continue      # 도구는 실행하지 않는다
+        result = run_tool(block.name, block.input)   # 승인됐거나, 애초에 안전한 도구만 여기 온다</code></pre>
+  <p>게이트는 <strong>도구 함수 안(<code>tools.py</code>)이 아니라 루프(<code>agent.py</code>)</strong>에 둔다. 이유가 넷이다.</p>
+  <ul>
+    <li><strong><code>tools.py</code>는 "무엇을 할 수 있는가"(능력), <code>agent.py</code>는 "무엇을 할 것인가"(정책).</strong>
+      승인은 정책이다. <code>write_file</code>이라는 함수 자체는 승인의 존재를 알 필요가 없다.</li>
+    <li><strong>재사용·테스트 가능성.</strong> 도구 함수 안에 <code>input()</code>이 박히면 그 함수는 단위 테스트도 못 하고 다른 데서 못 쓴다.</li>
+    <li><strong>한 곳에서 전부 커버한다.</strong> 도구가 10개로 늘어도 게이트는 여전히 <strong>루프의 세 줄</strong>이다.
+      <code>run_tool</code> 안에 넣으면 승인 코드가 도구마다 흩어진다.</li>
+    <li><strong>순서.</strong> 게이트 검사를 <code>update_plan</code> 분기보다 <strong>먼저</strong> 둔다. 정책 판단이 실행 분기보다 앞에 와야
+      나중에 도구가 늘어도 <strong>게이트를 지나쳐 실행될 일이 없다</strong>.</li>
+  </ul>
+  <div class="callout why">
+    <strong>왜 길목 한 곳만 잠그면 에이전트 전체가 잠기나:</strong> M2에서 확인한 사실 — <strong>LLM은 직접 행동하지 못한다</strong>.
+    모델이 할 수 있는 건 <code>tool_use</code> 블록을 <strong>내는 것</strong>뿐이고, 그 블록은 <strong>예외 없이</strong>
+    agent loop의 저 <code>for</code>문을 통과해야 실제 효과가 된다. 모델에게는 우리 코드를 우회할 손발이 <strong>없다</strong>.
+    그래서 <strong>모든 행동이 반드시 지나가는 길목</strong>인 루프에 게이트를 걸면 전체가 걸린다.
+    일반화하면: <em>"에이전트에 규칙을 걸고 싶으면 <strong>도구가 아니라 루프</strong>를 봐라."</em>
+    그리고 이것이 <code>_update_plan</code>(상태)과 게이트(정책)가 <strong>둘 다</strong> <code>agent.py</code>에 있는 이유다 —
+    <strong>정책·상태는 루프(agent)가 소유하고, 효과는 도구(tools)가 소유한다.</strong>
+  </div>
+
+  <h3>★ 거부해도 루프는 깨지지 않는다 — 거부는 '관찰'이다</h3>
+  <p>사람이 <code>n</code>을 눌렀다. 도구는 실행하지 않는다. 그럼 <strong>모델에게는 뭐라고 말하나?</strong>
+    "거부했으니 아무것도 안 보내면 되지" — <strong>이게 이 모듈의 대표 함정이고, 400을 부른다.</strong></p>
+  <div class="callout warn">
+    <strong>★ 거부해도 <code>tool_result</code>는 반드시 회신한다:</strong>
+    M2의 규칙 — <strong><code>tool_use</code> 하나당 <code>tool_result</code> 하나</strong>, <code>tool_use_id</code>가 일치해야 하고,
+    짝이 빠지면 다음 <code>messages.create</code>가 <strong>400</strong>이다.
+    <strong>이 규칙은 사용자가 거부해도 그대로 유효하다.</strong> 왜냐하면 모델은 이미 <code>tool_use</code> 블록을 냈고,
+    그 assistant 응답은 <strong>이미 history에 들어갔기</strong> 때문이다. 사람이 거부한 건 <strong>도구 실행</strong>이지
+    <strong>모델의 요청 자체가 없던 일이 되는 게 아니다</strong>.
+    그러므로 거부의 올바른 처리는 <strong>"아무것도 안 하기"가 아니라 "안 하고 나서, 안 했다고 말하기"</strong>다.
+  </div>
+  <pre><code class="language-python">DENIED_MSG = "사용자가 이 도구 실행을 거부했습니다. 다른 방법을 찾거나 사용자에게 물어보세요."
+
+if block.name in DANGEROUS_TOOLS and not confirm(block.name, block.input):
+    print("  [거부됨] 실행하지 않고, 거부 사실을 모델에게 알립니다.")
+    tool_results.append({
+        "type": "tool_result",
+        "tool_use_id": block.id,   # tool_use 와 반드시 매칭 (M2)
+        "content": DENIED_MSG,     # 문자열! (M2 — content는 문자열)
+        "is_error": True,          # 이 tool_result 가 '실패/거부'임을 알리는 필드
+    })
+    continue                       # 도구는 실행하지 않는다. 루프는 계속 돈다.</code></pre>
+  <p>도구는 <strong>안 돌고</strong>, 회신은 <strong>간다</strong>. 그러면 ReAct의 <strong>관찰</strong> 자리에 "거부됨"이 들어가고,
+    모델은 그걸 읽고 <strong>스스로 적응</strong>한다 — 다른 방법을 시도하거나, "그럼 어떻게 할까요?"라고 되묻거나, 그 단계를 건너뛴다.
+    <strong>거부가 크래시가 아니라 하나의 관찰(observation)이 되는 것</strong> — 이 한 조각이 M5의 전부다.
+    <strong>에이전트를 안전하게 만드는 것과 에이전트를 망가뜨리는 것은 다르다.</strong></p>
+  <pre><code class="language-text">목표 한 줄
+   ↓
+[추론]   모델이 tool_use 블록을 낸다             ← M3 그대로
+   ↓
+[게이트]  block.name in DANGEROUS_TOOLS ?        ← M5 신규. run_tool() 호출 '직전'
+   ├─ 아니오(안전) ───────────────────────────→ 묻지 않고 실행
+   └─ 예(위험) → confirm() → 사람에게 [y/N]
+         ├─ y       ───────────────────────→ 실행
+         └─ Enter/n ───────────────────────→ 실행하지 않음
+   ↓
+[행동]   run_tool(...)                          ← 승인됐거나 애초에 안전한 도구만 여기 온다
+   ↓
+[관찰]   tool_result 를 history 에 넣는다        ← M3 그대로
+         · 실행됨: 결과 문자열
+         · 거부됨: DENIED_MSG + is_error: True   ← 어느 쪽이든 짝은 '반드시' 회신된다
+   ↓
+다음 스텝 (루프는 거부당해도 계속 돈다)</code></pre>
+  <div class="callout warn">
+    <strong>흔한 오답 3종 — 전부 틀렸다:</strong>
+    <strong>① <s>거부했으니 <code>tool_results</code>에 아무것도 안 넣는다</s></strong> → 짝 없는 <code>tool_use</code>가 남아
+    다음 호출이 <strong>400</strong>.
+    <strong>② <s>거부했으니 루프를 <code>break</code>하거나 예외를 던진다</s></strong> → 에이전트가 <strong>죽는다</strong>.
+    거부는 "<strong>이 행동만</strong> 하지 마"이지 "일 그만둬"가 아니다.
+    <strong>③ <s>거부 사실을 안 알리고 빈 문자열을 회신한다</s></strong> → 모델이 <strong>성공한 줄 알고</strong> 다음 단계로 간다(더 나쁘다).
+    게다가 빈 <code>content</code>는 그 자체로 400을 낼 수 있다.
+  </div>
+  <div class="callout why">
+    <strong>왜 <code>DENIED_MSG</code>가 하필 저 문구인가:</strong> 그냥 <code>"거부됨"</code>이라고만 보내면 모델이
+    <strong>같은 도구를 다시 부르며 무한 재시도</strong>할 수 있다. 그래서 관찰 안에
+    <strong>다음 행동 지침</strong>("다른 방법을 찾거나 사용자에게 물어보세요")까지 넣는다.
+    <strong>비유의 한계(에러 코드를 리턴하는 syscall):</strong> 실패한 syscall이 예외를 던지는 대신 에러 코드를 돌려주고
+    호출자가 그걸 보고 분기하는 것과 구조는 같다. 다만 syscall의 에러 코드는 <strong>정해진 상수</strong>지만,
+    여기서 돌아가는 건 <strong>모델이 읽고 해석하는 자연어 문장</strong>이다 — 그래서 <strong>문구 자체가 설계의 일부</strong>다.
+  </div>
+
+  <h3>자율성 ↔ 안전 — 무엇을 '위험'으로 볼 것인가</h3>
+  <p>게이트를 어디에 몇 개 걸지는 <strong>트레이드오프</strong>다. 공짜 점심이 없다.</p>
+  <ul>
+    <li><strong>승인이 너무 많으면:</strong> 사람이 매 스텝 앉아 <code>y</code>를 눌러야 한다 → <strong>자율성이 죽는다</strong>
+      (그럴 거면 에이전트를 쓸 이유가 없다). 더 나쁜 건 <strong>승인 피로(approval fatigue)</strong> —
+      습관적으로 <code>y</code>만 누르게 되어 게이트가 <strong>유명무실</strong>해진다. <em>게이트가 있는데도 사고가 난다.</em></li>
+    <li><strong>승인이 없으면:</strong> 모델이 <code>run_bash("rm -rf …")</code>를 한 번 내면 그걸로 끝이다.</li>
+  </ul>
+  <div class="callout note">
+    <strong>기준 = 되돌릴 수 있는가(irreversibility).</strong>
+    <code>read_file</code>은 읽기만 하니 <strong>잘못 돌아도 되돌릴 게 없다</strong> → <strong>자동 실행</strong>(그래서
+    <code>DANGEROUS_TOOLS</code>에 안 들어간다). <code>write_file</code>은 <strong>덮어쓰고</strong>,
+    <code>run_bash</code>는 <strong>뭐든 할 수 있다</strong>(삭제 포함) → <strong>게이트</strong>.
+    일반화하면 <strong>파일 덮어쓰기 · 셸 실행 · 삭제 · 외부 전송(네트워크·메일·결제)</strong> = 되돌리기 어려운 행동이다.
+    보조 축은 <strong>영향 범위(blast radius)</strong> — 로컬 tmp 폴더냐 프로덕션 DB냐.
+  </div>
+  <div class="callout why">
+    <strong>fail-closed — 게이트는 '거부' 쪽으로 넘어져야 한다:</strong> 그래서 프롬프트 기본값이 <code>[y/N]</code>(대문자 N)이다 —
+    <strong>그냥 Enter를 치면 거부</strong>다. 비대화형 실행(파이프·CI·백그라운드)에서 <code>input()</code>이
+    <code>EOFError</code>를 내면 그것도 <strong>거부로 처리</strong>한다. <strong>못 물어보면 안 하는 것</strong>이 안전한 기본값이다.
+    (거꾸로 만들면 — 기본값 <code>y</code>, 에러 시 실행 — CI에서 조용히 <code>rm</code>이 도는 시스템이 된다.)
+  </div>
+  <p>실무에서 자율성을 되찾는 다이얼은 더 있다 — <strong>allowlist</strong>(<code>ls</code>·<code>cat</code>처럼 안전한 명령만 자동 허용),
+    <strong>샌드박스</strong>(격리 환경에선 게이트 없이 자율 최대), <strong>dry-run</strong>, <strong>작업 전 git commit</strong>(되돌릴 수 있게 만들기).
+    핵심은 방향이다 — <strong>게이트를 줄이는 방법은 "덜 묻기"가 아니라 "덜 위험하게 만들기"</strong>다.
+    M5는 그중 <strong>가장 단순한 다이얼 하나(y/n)</strong>만 구현한다.</p>
+
+  <h3>한눈 정리</h3>
+  <ul>
+    <li><strong>planning</strong> = 목표를 하위 단계로 쪼개 <strong>명시적 상태</strong>로 들고 있는 것.
+      <code>update_plan(steps)</code>은 <strong>부작용 없는 '상태 기록' 도구</strong>일 뿐이다 — 저장 + 출력 + <strong>문자열 반환</strong>이 전부.
+      효과는 <strong>생각의 외부화</strong>(모델이 덜 흔들린다)와 <strong>관찰 가능성</strong>(우리가 미리 본다)에서 온다.
+      계획을 세웠다고 <strong>실행이 보장되진 않는다</strong>.</li>
+    <li><strong>autonomy</strong>의 엔진은 <strong>이미 M3의 agent loop</strong>다. M5가 더하는 건 <strong>방향</strong>(먼저 계획하라)과
+      <strong>한계</strong>(위험한 건 묻고 하라)뿐. 자율성은 on/off가 아니라 <strong>다이얼</strong>이다.</li>
+    <li><strong>guardrail</strong>은 <strong>프롬프트가 아니라 코드</strong>다 — <code>SYSTEM</code>의 정책 문장은 <strong>부탁</strong>,
+      <code>if block.name in DANGEROUS_TOOLS</code>는 <strong>강제</strong>. 게이트는 <code>tools.py</code>가 아니라
+      모든 행동이 반드시 지나는 <strong>길목인 agent loop</strong>에 둔다.
+      원칙 한 줄: <strong>정책·상태는 루프가, 효과는 도구가 소유한다.</strong></li>
+    <li><strong>★ 거부는 크래시가 아니라 '관찰'이다.</strong> 거부해도 <strong><code>tool_use</code> 하나당 <code>tool_result</code> 하나</strong>는
+      반드시 회신한다(안 보내면 <strong>400</strong> — M2). 도구는 안 돌리고 <code>is_error: True</code> + <code>DENIED_MSG</code>를 돌려주면
+      모델이 그 관찰을 읽고 <strong>우회하거나 되묻는다</strong>. <strong>그래서 거부해도 루프가 안 깨진다.</strong></li>
+    <li><strong>트레이드오프의 기준 = 되돌릴 수 있는가.</strong> 읽기는 자동, <strong>덮어쓰기·셸 실행·삭제·외부 전송</strong>은 게이트.
+      게이트는 <strong>fail-closed</strong>(<code>[y/N]</code> 기본 거부, <code>EOFError</code> → 거부). 승인이 잦으면 <strong>승인 피로</strong>로
+      게이트가 무력해진다 — 해법은 <strong>"덜 묻기"가 아니라 "덜 위험하게 만들기"</strong>(allowlist·샌드박스·dry-run).</li>
+    <li><strong>범위</strong> = 계획 + 자율 실행 + 승인 게이트까지. Hermes는 <strong>가진 도구로만</strong> 자율적이다 —
+      <strong>모르는 지식을 검색해 오는 것(RAG)은 M6</strong>, <strong>통합·eval·trace는 M7</strong>.
+      (지금의 <code>print</code> 로그는 눈으로 보는 임시 출력일 뿐 구조화된 trace가 아니다.)</li>
+  </ul>
+</section>
+
+        <!-- ========== 직접 사용해보기 ========== -->
+<section class="module-section" id="practice">
+  <h2>직접 사용해보기</h2>
+  <p class="hint">아래 코드를 직접 타이핑해 실행해 보세요. 전제: <code>clone-project</code>를 <code>uv</code>로 셋업(Python 3.12), 그리고 <code>ANTHROPIC_API_KEY</code>.
+    실습 파일은 <code>clone-project/practice/05-planning-autonomy/stepN.py</code>에 두고
+    <code>cd clone-project &amp;&amp; uv run python practice/05-planning-autonomy/stepN.py</code>로 실행합니다.
+    각 <code>stepN.py</code>는 그대로 실행되도록 import·도구 정의를 포함합니다
+    (<code>practice/</code>는 <code>.gitignore</code>된 개인 실험 공간입니다).</p>
+
+  <div class="callout warn">
+    <strong>⚠ 이번 실습은 반드시 <em>대화형 터미널</em>에서 실행한다.</strong> 승인 게이트가 <code>input()</code>으로 사람에게 <code>[y/N]</code>을 묻기 때문이다.
+    파이프(<code>echo y | uv run python …</code>)·리다이렉트(<code>&lt; /dev/null</code>)·CI·백그라운드로 돌리면 <code>input()</code>이 <strong><code>EOFError</code></strong>를 낸다 →
+    우리 <code>confirm()</code>은 그걸 잡아 <strong>거부(<code>False</code>)로 처리</strong>하므로(fail-closed) 위험 도구가 <strong>하나도 실행되지 않는다</strong>. 터미널에서 직접 키를 눌러야 한다.
+  </div>
+
+  <p>M3~M4의 Hermes는 목표를 받으면 <strong>아무 계획 없이 즉흥적으로</strong> 도구를 고르고, <strong>무엇이든 묻지 않고 그냥 실행</strong>했다.
+    이번 실습은 그 루프에 두 가지를 끼운다 — ① 모델이 <strong>가장 먼저 <code>update_plan</code>으로 계획을 세우고</strong>(계획의 외부화),
+    ② <strong>되돌리기 어려운 도구는 실행 직전에 <code>[y/N]</code> 승인</strong>을 받는다(승인 게이트). 그리고 이 모듈의 하이라이트 —
+    <strong>거부(deny)해도 루프가 깨지지 않는다</strong>: 도구는 실행하지 않되 <code>is_error: True</code>인 <code>tool_result</code>를 <strong>반드시 회신</strong>해
+    "거부됨"을 하나의 <strong>관찰(observation)</strong>로 돌려주면, 모델이 스스로 우회하거나 되묻는다. <strong>승인 1회 + 거부 1회를 둘 다</strong> 돌려본다.</p>
+
+  <div class="callout note">
+    <strong>이 실습의 도구는 전부 가짜다 — 부작용 0.</strong> 특히 <code>delete_file(path)</code>은 <strong>실제로는 아무것도 지우지 않는다</strong>
+    (<code>"(가짜) temp1.log 삭제됨"</code>이라는 문자열만 돌려준다). 그런데도 <strong>위험 도구로 "취급"</strong>한다 —
+    삭제는 <em>되돌리기 어려운 행동</em>의 교과서적 예라 게이트의 필요성이 직관적으로 꽂히고, <strong>진짜로 안 지우니 <code>y</code>도 <code>n</code>도 마음껏 눌러 볼 수 있기</strong> 때문이다.
+    (M2의 가짜 <code>get_weather</code>, M3의 계산기 도구와 같은 전통: <strong>실습은 메커니즘만 빠르게, 부작용은 0</strong>. 진짜 셸·진짜 파일 쓰기의 무게는 <strong>클론</strong>에서 만난다.)
+  </div>
+
+  <h3>0) 준비</h3>
+  <pre><code class="language-bash">cd clone-project
+uv sync                                   # Python 3.12.* + 의존성 (.venv 생성, 최초 1회)
+export ANTHROPIC_API_KEY="sk-ant-..."     # 본인 키로 (코드에 하드코딩 금지)
+mkdir -p practice/05-planning-autonomy    # 이번 모듈 실습 폴더</code></pre>
+  <div class="callout note">
+    M1~M4와 동일 환경이다(uv, Python 3.12). 키는 <a href="https://console.anthropic.com/">console.anthropic.com</a>에서 발급한다.
+    <strong>아래 step1은 API를 부르지 않으니 키가 없어도</strong> 실행된다(도구·게이트를 로컬에서 먼저 검증).
+    step2·step3은 <strong>루프가 매 스텝 <code>messages.create</code>를 부른다</strong> — 이번 예제는 각각 4~5번쯤 불린다.
+    <code>max_tokens</code>를 작게(512), <code>max_steps</code>를 8로 잡아 비용을 억제한다.
+  </div>
+
+  <h3>1) 부품 만들기 — 도구 3개 · <code>DANGEROUS_TOOLS</code> · <code>confirm()</code> (키 불필요)</h3>
+  <p>루프에 끼우기 전에 부품부터 만든다. 도구는 <strong>세 개</strong>다 — <code>update_plan</code>(계획 기록, <strong>부작용 없음</strong>) ·
+    <code>list_files</code>(가짜, <strong>안전</strong>) · <code>delete_file</code>(가짜, <strong>위험으로 취급</strong>).
+    그리고 게이트를 걸 <strong><code>DANGEROUS_TOOLS</code> 집합</strong>과, 실행 직전 사람에게 묻는 <strong><code>confirm()</code></strong>을 정의한다.
+    이 파일은 <strong>API를 부르지 않으므로</strong> 키 없이 돌아간다 — 대신 <code>confirm()</code>에 직접 <code>y</code>와 <code>Enter</code>를 눌러 본다.</p>
+  <pre><code class="language-python"># step1.py — M5 실습의 부품: 도구 3개 + 계획 상태 + 위험 도구 집합 + 승인 함수 confirm()
+#            (API 호출 없음 — 키가 없어도 실행된다. 게이트를 루프에 끼우는 건 step2에서.)
+#            ⚠ confirm()이 input()을 쓴다 → 반드시 대화형 터미널에서 실행할 것.
+
+# 1) 모델에게 알려줄 도구 "명세" 3개.
+tools = [
+    {
+        "name": "update_plan",
+        "description": "현재 작업 계획(단계 목록)을 기록/갱신한다. 여러 단계가 필요한 목표를 받으면 "
+                       "가장 먼저 이 도구로 계획을 세우고 시작한다. 계획이 바뀌면 다시 호출한다.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",                  # ★ 첫 array 인자 (M2~M4는 전부 string/number였다)
+                    "items": {"type": "string"},
+                    "description": "실행할 단계들. 각 항목은 한 줄짜리 행동, 예: '파일 목록을 확인한다'",
+                },
+            },
+            "required": ["steps"],
+        },
+    },
+    {
+        "name": "list_files",
+        "description": "작업 폴더의 파일 목록을 반환한다. 읽기만 하므로 안전하다.",
+        "input_schema": {"type": "object", "properties": {}},   # 인자 없는 도구 → properties는 빈 객체
+    },
+    {
+        "name": "delete_file",
+        "description": "지정한 경로의 파일을 삭제한다. 되돌릴 수 없다.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "삭제할 파일의 경로"},
+            },
+            "required": ["path"],
+        },
+    },
+]
+
+# 2) 에이전트 자신의 상태 — 현재 계획 (클론에선 self.plan)
+plan = []
+
+
+def update_plan(steps):
+    """계획 기록 핸들러 — 부작용이 '없다'. 파일도 셸도 건드리지 않는다.
+    모델이 준 steps를 우리 쪽 상태(plan)에 저장하고, 화면에 찍고, 문자열을 돌려주는 게 전부다."""
+    global plan
+    plan = steps
+    print(f"  [plan] {len(steps)}단계")
+    for i, s in enumerate(steps, 1):
+        print(f"    {i}. {s}")
+    return f"계획 저장됨: {len(steps)}단계"   # ★ 반드시 '문자열' — tool_result content 규칙(M2)
+
+
+# 3) 바깥 세상을 다루는 도구 2개 — 둘 다 '가짜'다(부작용 0).
+def list_files():
+    """(가짜) 실제 폴더를 읽지 않는다. 하드코딩된 목록을 문자열로 돌려준다. → 안전(자동 실행)"""
+    return "app.py\nmain.py\nREADME.md\ntemp1.log\ntemp2.log\nnotes.txt"
+
+
+def delete_file(path):
+    """★ 가짜다 — 실제로 아무것도 지우지 않는다. '지운 척'하는 문자열만 돌려준다.
+    그런데도 '위험 도구'로 취급한다(삭제 = 되돌리기 어려운 행동의 교과서적 예).
+    진짜로 안 지우니 y도 n도 마음껏 눌러 볼 수 있다 — 진짜 삭제/셸은 클론에서 만난다."""
+    return f"(가짜) {path} 삭제됨"
+
+
+def run_tool(name, tool_input):
+    """도구 이름으로 실제 함수를 부르는 디스패처. 반환은 반드시 문자열.
+    ※ update_plan은 여기 없다 — 바깥 세상이 아니라 '에이전트 자신의 상태(plan)'를 바꾸는
+       도구라서 agent loop(step2)가 직접 처리한다. 클론의 tools.py / agent.py 분리와 같은 이유."""
+    if name == "list_files":
+        return list_files()
+    if name == "delete_file":
+        return delete_file(tool_input["path"])
+    return f"[unknown tool: {name}]"
+
+
+# 4) ★ 가드레일 — 승인 게이트를 걸 '위험 도구' 집합. 기준은 "되돌릴 수 있는가?"
+#    list_files는 읽기만 하니 잘못 돌아도 되돌릴 게 없다 → 자동 실행.
+#    delete_file은 되돌릴 수 없다 → 실행 직전에 사람에게 묻는다.
+DANGEROUS_TOOLS = {"delete_file"}     # ← set이다(문자열로 쓰면 in 검사가 부분 문자열 검사가 된다)
+
+
+# 5) ★ 승인 게이트(human-in-the-loop) — 위험 도구 실행 '직전'에 y/n을 묻는다.
+def confirm(name, tool_input):
+    """기본값은 거부([y/N]) — 되돌리기 어려운 행동의 안전한 기본값은 '안 함'이다(fail-closed).
+    비대화형 실행(파이프/CI)에선 input()이 EOFError를 내므로 그것도 거부로 처리한다."""
+    print(f"  [승인 요청] {name}({tool_input})")
+    try:
+        answer = input("  실행할까요? [y/N] ").strip().lower()
+    except EOFError:
+        return False          # 못 물어보면 안 한다
+    return answer == "y"      # y가 아니면(Enter·n·그 무엇이든) 전부 거부
+
+
+# --- API 없이 부품이 도는지 로컬에서 먼저 확인한다 (과금 0) ---
+print(run_tool("list_files", {}))
+print(run_tool("delete_file", {"path": "temp1.log"}))    # 진짜로 지우지 않는다
+print(update_plan(["파일 목록 확인", ".log 파일 고르기", "각각 삭제"]))
+print(f"plan 상태: {plan}")
+print(f"delete_file in DANGEROUS_TOOLS? {'delete_file' in DANGEROUS_TOOLS}")
+print(f"list_files  in DANGEROUS_TOOLS? {'list_files' in DANGEROUS_TOOLS}")
+
+# 게이트를 손으로 한 번 돌려 본다 — y면 True, 그냥 Enter면 False(기본 거부)
+print(f"confirm -> {confirm('delete_file', {'path': 'temp1.log'})}")</code></pre>
+  <pre><code class="language-bash">uv run python practice/05-planning-autonomy/step1.py</code></pre>
+  <p>마지막 줄에서 프롬프트가 멈춘다. <strong>그냥 <code>Enter</code></strong>를 쳐 보라(= 기본값 거부):</p>
+  <pre class="output">app.py
+main.py
+README.md
+temp1.log
+temp2.log
+notes.txt
+(가짜) temp1.log 삭제됨
+  [plan] 3단계
+    1. 파일 목록 확인
+    2. .log 파일 고르기
+    3. 각각 삭제
+계획 저장됨: 3단계
+plan 상태: ['파일 목록 확인', '.log 파일 고르기', '각각 삭제']
+delete_file in DANGEROUS_TOOLS? True
+list_files  in DANGEROUS_TOOLS? False
+  [승인 요청] delete_file({'path': 'temp1.log'})
+  실행할까요? [y/N]
+confirm -> False</pre>
+  <p>다시 실행해 이번엔 <strong><code>y</code> + Enter</strong>를 눌러 보라 → 마지막 줄이 <code>confirm -&gt; True</code>로 바뀐다.
+    <code>y</code> <em>말고는</em> 전부(<code>Enter</code>·<code>n</code>·<code>Y</code>가 아닌 오타·심지어 <code>yes</code>) 거부다.</p>
+
+  <div class="callout why">
+    <strong>왜 기본값이 거부(<code>[y/N]</code>)인가 — fail-closed.</strong> 대문자 <code>N</code>이 기본값이라는 관례 표기다(<code>rm -i</code>와 같다).
+    되돌리기 어려운 행동의 <strong>안전한 기본값은 "안 함"</strong>이다 — 사용자가 무심코 Enter를 쳐도, 스크립트가 비대화형으로 돌아 <code>EOFError</code>가 나도,
+    <strong>넘어지는 방향은 언제나 "실행 안 함"</strong>이어야 한다. <code>return answer == "y"</code> 한 줄이 그걸 보장한다(<code>!= "n"</code>이었다면 정반대가 된다).
+  </div>
+  <div class="callout note">
+    <strong>세 가지를 미리 짚어 둔다(클론에서 그대로 다시 만난다).</strong>
+    <ul>
+      <li><strong><code>update_plan</code>은 마법이 아니다.</strong> 하는 일은 <code>plan</code>에 <strong>저장</strong>하고 <strong>화면에 출력</strong>하고 <strong>문자열을 반환</strong>하는 것이 전부다 — 파일도 셸도 없다.
+        그래서 <strong><code>DANGEROUS_TOOLS</code>에 안 들어간다</strong>(되돌릴 게 없으니 물을 이유도 없다).</li>
+      <li><strong><code>run_tool</code>에 <code>update_plan</code>이 없다.</strong> <code>list_files</code>·<code>delete_file</code>은 <em>바깥 세상</em>을 바꾸지만
+        <code>update_plan</code>은 <em>에이전트 자신의 상태</em>(<code>plan</code>)를 바꾼다 → 도구 디스패처가 아니라 <strong>루프가 직접</strong> 처리한다(step2에서 확인).</li>
+      <li><strong><code>update_plan</code>의 반환은 문자열이어야 한다.</strong> <code>f"계획 저장됨: {len(steps)}단계"</code> — 여기서 <code>len(steps)</code>(숫자)를 그대로 리턴하면
+        <code>tool_result</code>의 <code>content</code>가 숫자가 되어 <strong>400</strong>이 난다(M2 규칙 · M3 실습에서 이미 겪은 그 에러).</li>
+    </ul>
+  </div>
+
+  <h3>2) 미니 agent loop에 게이트 끼우기 — 계획 → 자동 실행 → 승인(<code>y</code>)</h3>
+  <p>이제 M3의 그 <code>while</code> 루프를 그대로 가져와 <strong>딱 두 곳</strong>을 더한다 —
+    <strong>① <code>run_tool</code>을 부르기 직전의 게이트 3줄</strong>(ReAct의 '행동' 단계 바로 앞)과 <strong>② <code>update_plan</code> 분기</strong>.
+    목표는 한 줄만 준다: <code>"작업 폴더의 임시 로그 파일(.log)을 정리해줘"</code>.
+    <strong>루프·<code>stop_reason</code> 분기·<code>max_steps</code>는 M3에서 하나도 안 바뀌었다.</strong>
+    (step1의 부품을 그대로 포함해 이 파일 하나로 실행된다.)</p>
+  <pre><code class="language-python"># step2.py — 미니 agent loop에 '승인 게이트'를 끼운다
+#            (step1의 부품을 그대로 포함해 이 파일 하나로 실행된다)
+#            ⚠ input()으로 승인을 받는다 → 반드시 대화형 터미널에서 실행할 것.
+import anthropic
+
+client = anthropic.Anthropic()          # ANTHROPIC_API_KEY 환경변수 자동 사용
+MODEL = "claude-sonnet-4-6"
+MAX_TOKENS = 512
+max_steps = 8                           # 무한 루프 가드 (M3)
+
+# ★ 가드레일 — 되돌리기 어려운 도구 '집합'. delete_file만 게이트를 건다.
+DANGEROUS_TOOLS = {"delete_file"}
+
+# ★ 거부 시 모델에게 돌려줄 '관찰' 문구. 그냥 "거부됨"이 아니라 '다음에 뭘 하라'까지 넣는다 —
+#   안 그러면 모델이 같은 도구를 무한 재시도한다.
+DENIED_MSG = "사용자가 이 도구 실행을 거부했습니다. 다른 방법을 찾거나 사용자에게 물어보세요."
+
+# 행동 정책을 system에 적는다. 단 이건 '부탁'이다 — 강제는 아래 게이트 코드가 한다.
+SYSTEM = (
+    "너는 파일 정리를 돕는 도우미다. "
+    "여러 단계가 필요한 목표를 받으면, 가장 먼저 update_plan 도구로 계획(단계 목록)을 세운 뒤 실행을 시작한다. "
+    "delete_file처럼 되돌리기 어려운 도구는 사용자 승인이 필요하다. 거부당하면 같은 도구를 억지로 다시 부르지 말고, "
+    "다른 방법을 찾거나 사용자에게 무엇을 원하는지 물어본다."
+)
+
+tools = [
+    {
+        "name": "update_plan",
+        "description": "현재 작업 계획(단계 목록)을 기록/갱신한다. 여러 단계가 필요한 목표를 받으면 "
+                       "가장 먼저 이 도구로 계획을 세우고 시작한다. 계획이 바뀌면 다시 호출한다.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "실행할 단계들. 각 항목은 한 줄짜리 행동, 예: '파일 목록을 확인한다'",
+                },
+            },
+            "required": ["steps"],
+        },
+    },
+    {
+        "name": "list_files",
+        "description": "작업 폴더의 파일 목록을 반환한다. 읽기만 하므로 안전하다.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "delete_file",
+        "description": "지정한 경로의 파일을 삭제한다. 되돌릴 수 없다.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "삭제할 파일의 경로"},
+            },
+            "required": ["path"],
+        },
+    },
+]
+
+plan = []
+
+
+def update_plan(steps):
+    global plan
+    plan = steps
+    print(f"  [plan] {len(steps)}단계")
+    for i, s in enumerate(steps, 1):
+        print(f"    {i}. {s}")
+    return f"계획 저장됨: {len(steps)}단계"   # ★ 반드시 문자열
+
+
+def list_files():
+    return "app.py\nmain.py\nREADME.md\ntemp1.log\ntemp2.log\nnotes.txt"
+
+
+def delete_file(path):
+    return f"(가짜) {path} 삭제됨"           # ★ 진짜로는 아무것도 안 지운다
+
+
+def run_tool(name, tool_input):
+    # ※ update_plan은 여기 없다 — agent loop가 직접 처리한다(에이전트 자신의 상태를 바꾸는 도구).
+    if name == "list_files":
+        return list_files()
+    if name == "delete_file":
+        return delete_file(tool_input["path"])
+    return f"[unknown tool: {name}]"
+
+
+def confirm(name, tool_input):
+    """위험 도구 실행 '직전'에 사람에게 y/n을 묻는다. 기본값은 거부([y/N], 그냥 Enter = 거부).
+    비대화형 실행에선 EOFError → 거부(fail-closed)."""
+    print(f"  [승인 요청] {name}({tool_input})")
+    try:
+        answer = input("  실행할까요? [y/N] ").strip().lower()
+    except EOFError:
+        return False
+    return answer == "y"
+
+
+# --- 목표 한 줄을 주고 루프를 돌린다 ---
+messages = [{"role": "user", "content": "작업 폴더의 임시 로그 파일(.log)을 정리해줘"}]
+
+step = 0
+while step &lt; max_steps:
+    step += 1
+    resp = client.messages.create(
+        model=MODEL, max_tokens=MAX_TOKENS,
+        system=SYSTEM, tools=tools, messages=messages,
+    )
+    messages.append({"role": "assistant", "content": resp.content})   # 통째로 보존(M3)
+
+    if resp.stop_reason != "tool_use":                                # 종료 분기(M3)
+        final = "".join(b.text for b in resp.content if b.type == "text")
+        print(f"[step {step}] end_turn -> {final}")
+        break
+
+    tool_results = []
+    for block in resp.content:
+        if block.type == "tool_use":
+            print(f"  ↳ step {step}: {block.name}({block.input})")
+
+            # ★★ 승인 게이트 — run_tool을 부르기 '직전'(= ReAct의 '행동' 단계 바로 앞).
+            #     정책 판단이 실행 분기보다 먼저 온다 → 도구가 늘어도 게이트를 지나쳐 실행될 일이 없다.
+            if block.name in DANGEROUS_TOOLS and not confirm(block.name, block.input):
+                print("  [거부됨] 실행하지 않고, 거부 사실을 모델에게 알립니다.")
+                # ★★ 거부해도 tool_use 하나당 tool_result 하나! (M2 규칙 — 빠지면 400)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,   # tool_use와 반드시 매칭
+                    "content": DENIED_MSG,     # 문자열
+                    "is_error": True,          # 실패/거부임을 알리는 필드
+                })
+                continue                       # 도구는 실행하지 않는다. 루프는 계속 돈다.
+
+            # update_plan은 '에이전트 자신의 상태(plan)'를 바꾼다 → run_tool이 아니라 여기서 처리
+            if block.name == "update_plan":
+                result = update_plan(block.input["steps"])
+            else:
+                result = run_tool(block.name, block.input)   # 바깥 세상을 바꾸는 도구
+
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": result,
+            })
+    messages.append({"role": "user", "content": tool_results})
+else:
+    print(f"[max_steps={max_steps} 도달 — 루프를 강제 종료했어요]")</code></pre>
+  <p>실행하고, <strong>승인 요청이 뜰 때마다 <code>y</code> + Enter</strong>를 눌러 끝까지 가 본다(1회차 = <strong>전부 승인</strong>).</p>
+  <pre><code class="language-bash">uv run python practice/05-planning-autonomy/step2.py</code></pre>
+  <pre class="output">  ↳ step 1: update_plan({'steps': ['작업 폴더의 파일 목록을 확인한다', '.log 확장자 파일을 고른다', '고른 .log 파일을 각각 삭제한다']})
+  [plan] 3단계
+    1. 작업 폴더의 파일 목록을 확인한다
+    2. .log 확장자 파일을 고른다
+    3. 고른 .log 파일을 각각 삭제한다
+  ↳ step 2: list_files({})
+  ↳ step 3: delete_file({'path': 'temp1.log'})
+  [승인 요청] delete_file({'path': 'temp1.log'})
+  실행할까요? [y/N] y
+  ↳ step 4: delete_file({'path': 'temp2.log'})
+  [승인 요청] delete_file({'path': 'temp2.log'})
+  실행할까요? [y/N] y
+[step 5] end_turn -> 임시 로그 파일 2개(temp1.log, temp2.log)를 삭제했습니다. app.py, main.py, README.md, notes.txt는 그대로 두었습니다.</pre>
+  <div class="callout why">
+    <strong>여기서 볼 것 세 가지.</strong>
+    <ul>
+      <li><strong>계획이 먼저 나온다(step 1).</strong> 목표는 한 줄이었는데 모델이 <strong>스스로 3단계로 분해</strong>해 <code>update_plan</code>을 불렀다 —
+        그리고 우리는 그 계획을 <strong>실행 전에 화면으로 본다</strong>(<code>[plan]</code>). 이게 <strong>계획의 외부화</strong>다.</li>
+      <li><strong><code>list_files</code>는 <em>안 물어보고</em> 그냥 돌았다(step 2).</strong> 안전한 도구(읽기)는 <strong>자동 실행</strong>이다 —
+        게이트가 <em>모든</em> 도구를 막았다면 자율성이 죽는다.</li>
+      <li><strong><code>delete_file</code>에서만 멈춰 섰다(step 3·4).</strong> <code>if block.name in DANGEROUS_TOOLS</code> 한 줄이
+        <strong>모델의 모든 행동이 지나는 길목</strong>에서 위험 도구만 골라 세운 것이다. 모델은 이 <code>for</code>문을 <strong>우회할 방법이 없다</strong> —
+        손발이 전부 우리 코드이기 때문이다(M2).</li>
+    </ul>
+  </div>
+  <div class="callout note">
+    <strong>모델 출력이라 스텝 수·문구·계획 항목은 달라질 수 있다.</strong> 예를 들어 모델이 <strong>두 삭제를 한 스텝에 몰아서</strong> 요청하면
+    (한 응답에 <code>tool_use</code> 블록이 2개) <code>[승인 요청]</code>이 <strong>연달아 두 번</strong> 뜬다 — <code>for block in resp.content</code>가 블록마다 게이트를 거치므로
+    <strong>도구 하나당 승인 하나</strong>는 그대로다. 계획이 2단계나 4단계로 나오거나 최종 문구가 달라지는 것도 정상이다.
+    <em>변하지 않는 핵심</em>: <strong>(1) <code>update_plan</code>이 먼저</strong>, <strong>(2) <code>list_files</code>는 자동</strong>, <strong>(3) <code>delete_file</code>은 승인 후에만</strong>.
+  </div>
+
+  <h3>3) ★ 거부해 보기 — 도구는 안 돌고, <code>tool_result</code>는 간다</h3>
+  <p>이번이 <strong>이 모듈의 하이라이트</strong>다. step2를 복사해 <strong>3줄만</strong> 더한다 — 이 스텝에서 <strong>모델에게 회신될 <code>tool_result</code>를 그대로 <code>print</code></strong>하는 줄이다.
+    "거부했으니 아무것도 안 보낸다"가 아니라 <strong>"안 하고 나서, 안 했다고 말한다"</strong>는 걸 눈으로 확인하기 위해서다.</p>
+  <pre><code class="language-bash">cp practice/05-planning-autonomy/step2.py practice/05-planning-autonomy/step3.py</code></pre>
+  <p>그리고 <code>step3.py</code>의 루프 <strong>맨 끝</strong>(<code>messages.append({"role": "user", "content": tool_results})</code> <strong>바로 위</strong>)에 3줄을 끼운다:</p>
+  <pre><code class="language-python">    # ★ step3에서 추가한 3줄 — 이 스텝에서 "모델에게 회신될" tool_result를 그대로 들여다본다.
+    for tr in tool_results:
+        print(f"  [모델에게 회신] {tr}")
+    messages.append({"role": "user", "content": tool_results})   # ← 원래 있던 줄</code></pre>
+  <p>실행한 뒤, 이번엔 <strong>승인 요청에서 그냥 <code>Enter</code></strong>를 친다(= 거부).</p>
+  <pre><code class="language-bash">uv run python practice/05-planning-autonomy/step3.py</code></pre>
+  <pre class="output">  ↳ step 1: update_plan({'steps': ['작업 폴더의 파일 목록을 확인한다', '.log 확장자 파일을 고른다', '고른 .log 파일을 각각 삭제한다']})
+  [plan] 3단계
+    1. 작업 폴더의 파일 목록을 확인한다
+    2. .log 확장자 파일을 고른다
+    3. 고른 .log 파일을 각각 삭제한다
+  [모델에게 회신] {'type': 'tool_result', 'tool_use_id': 'toolu_01Aa...', 'content': '계획 저장됨: 3단계'}
+  ↳ step 2: list_files({})
+  [모델에게 회신] {'type': 'tool_result', 'tool_use_id': 'toolu_01Bb...', 'content': 'app.py\nmain.py\nREADME.md\ntemp1.log\ntemp2.log\nnotes.txt'}
+  ↳ step 3: delete_file({'path': 'temp1.log'})
+  [승인 요청] delete_file({'path': 'temp1.log'})
+  실행할까요? [y/N]
+  [거부됨] 실행하지 않고, 거부 사실을 모델에게 알립니다.
+  [모델에게 회신] {'type': 'tool_result', 'tool_use_id': 'toolu_01Cc...', 'content': '사용자가 이 도구 실행을 거부했습니다. 다른 방법을 찾거나 사용자에게 물어보세요.', 'is_error': True}
+[step 4] end_turn -> 삭제를 진행하지 않았습니다. temp1.log와 temp2.log는 그대로 두었어요. 원하시면 특정 파일만 지우거나, 삭제 대신 다른 폴더로 옮길 수도 있습니다. 어떻게 할까요?</pre>
+
+  <div class="callout warn">
+    <strong>★ 거부해도 루프는 깨지지 않는다 — 거부는 '관찰'이다.</strong>
+    사용자가 거부하면 도구는 안 돈다. 하지만 <strong>모델은 이미 <code>tool_use</code> 블록을 냈고 그건 history에 들어갔다</strong> —
+    M2의 규칙(<strong><code>tool_use</code> 하나당 <code>tool_result</code> 하나</strong>)은 <strong>거부해도 그대로 유효</strong>하다. 안 보내면 다음 호출이 <strong>400</strong>이다.
+    그래서 올바른 처리는 "아무것도 안 보내기"가 아니라 <strong>"안 하고 나서 안 했다고 말하기"</strong> —
+    <code>is_error: True</code>인 <code>tool_result</code>에 <code>DENIED_MSG</code>를 담아 회신하고 <code>continue</code>한다.
+    그러면 ReAct의 <strong>관찰</strong> 자리에 "거부됨"이 들어가고, 모델은 그걸 읽고 <strong>스스로 적응</strong>한다(위 <code>[step 4]</code>: 되묻는다).
+    <strong>흔한 오답 3종</strong> — ① <s>거부했으니 <code>tool_results</code>에 아무것도 안 넣는다</s> → <strong>400</strong>.
+    ② <s>거부했으니 <code>break</code>로 루프를 탈출한다</s> → 에이전트가 <strong>죽는다</strong>(거부는 "이 행동만 하지 마"이지 "일 그만둬"가 아니다).
+    ③ <s>거부 사실을 안 알리고 빈 문자열을 회신한다</s> → 모델이 <strong>성공한 줄 알고</strong> 다음 단계로 간다(더 나쁘다).
+  </div>
+  <div class="callout why">
+    <strong>회신된 dict 두 개를 나란히 놓고 비교하라 — 이게 이번 실습의 전부다.</strong>
+    <ul>
+      <li><strong>승인(<code>y</code>)했을 때</strong> — <code>{'type': 'tool_result', 'tool_use_id': 'toolu_…', 'content': '(가짜) temp1.log 삭제됨'}</code>
+        → 도구가 <strong>실행됐고</strong>, 그 결과가 관찰로 간다. <code>is_error</code>는 <strong>없다</strong>.</li>
+      <li><strong>거부(<code>Enter</code>)했을 때</strong> — <code>{'type': 'tool_result', 'tool_use_id': 'toolu_…', 'content': '사용자가 이 도구 실행을 거부했습니다…', 'is_error': True}</code>
+        → 도구는 <strong>실행되지 않았고</strong>(<code>(가짜) … 삭제됨</code> 문자열이 <strong>안 보인다</strong>), 대신 <strong>"거부됨"이라는 관찰</strong>이 같은 <code>tool_use_id</code>로 간다.</li>
+    </ul>
+    <strong>둘 다 <code>tool_result</code> 하나를 회신한다</strong> — 달라지는 건 <em>내용</em>(<code>content</code> + <code>is_error</code>)뿐이다.
+    그래서 <strong>400도, 크래시도 없이</strong> 루프가 <code>end_turn</code>까지 정상적으로 굴러간다. <strong>에이전트를 안전하게 만드는 것과 에이전트를 망가뜨리는 것은 다르다.</strong>
+    (<code>tool_use_id</code>는 실제로는 <code>toolu_01A…</code> 같은 긴 문자열이고, 매 실행마다 다르다.)
+  </div>
+  <p><strong>같은 <code>step3.py</code>를 다시 실행해 이번엔 <code>y</code></strong>를 눌러 보라 — 회신 dict가
+    <code>'content': '(가짜) temp1.log 삭제됨'</code>으로 바뀌고 <code>is_error</code>가 사라진다.
+    <strong>승인 1회 + 거부 1회</strong>를 둘 다 보고 나면 이 모듈의 절반이 아니라 전부를 본 것이다.</p>
+  <div class="callout note">
+    <strong>거부 후 모델의 반응은 매번 다를 수 있다.</strong> 위 예처럼 <strong>되묻거나</strong>(가장 흔함), <code>temp2.log</code>를 대신 시도하거나(→ <code>[승인 요청]</code>이 한 번 더 뜬다),
+    "삭제하지 않았습니다"라고 정리하고 끝낸다. <strong>어느 쪽이든 상관없다</strong> — 확인할 것은 딱 하나,
+    <strong>루프가 400이나 예외로 죽지 않고 <code>[step N] end_turn</code>까지 도달했다</strong>는 사실이다.
+  </div>
+
+  <div class="callout note">
+    <strong>실험해 보기(각 1분).</strong>
+    <ul>
+      <li><strong><code>DANGEROUS_TOOLS = {"delete_file", "list_files"}</code></strong>로 바꾸면? → 파일 <strong>목록만 읽는데도</strong> 승인을 묻는다.
+        모든 스텝에서 <code>y</code>를 눌러야 하니 <strong>에이전트를 쓸 이유가 사라진다</strong>. 이게 <strong>승인 피로(approval fatigue)</strong>의 실체다 —
+        게이트가 너무 많으면 사람은 <strong>습관적으로 <code>y</code></strong>를 눌러 게이트가 유명무실해진다. <strong>기준은 "되돌릴 수 있는가"</strong>임을 다시 확인하고 되돌려 둔다.</li>
+      <li><strong><code>DENIED_MSG = "거부됨"</code></strong>으로 바꾸면? → 모델이 <strong>같은 도구를 다시 부르며 재시도</strong>할 수 있다(그러면 게이트가 또 뜬다).
+        거부 관찰에는 <strong>"다음에 무엇을 하라"는 지침</strong>("다른 방법을 찾거나 사용자에게 물어보세요")이 들어가야 한다.</li>
+      <li><strong><code>update_plan</code>의 반환을 <code>len(steps)</code>(숫자)로</strong> 바꾸면? → 바로 <strong>400</strong>이 난다.
+        <em>M3 실습에서 만났던 그 에러</em>를 여기서 일부러 재현해 보면 원인이 몸에 남는다(아래 "막히면" 참고). 확인 후 <code>f"계획 저장됨: …"</code>로 되돌린다.</li>
+    </ul>
+  </div>
+
+  <div class="callout warn">
+    <strong>막히면:</strong>
+    <ul>
+      <li><strong>★ 거부했더니 <code>BadRequestError</code>(400)</strong> "<code>tool_use</code> ids were found without <code>tool_result</code> blocks" →
+        거부 분기에서 <code>tool_results</code>에 <strong>아무것도 안 넣고 <code>continue</code></strong>했다. <strong>거부해도 <code>tool_result</code> 하나는 반드시 회신</strong>한다
+        (<code>content=DENIED_MSG</code> + <code>is_error: True</code>). M2의 1:1 규칙은 거부해도 유효하다.</li>
+      <li><strong>거부하면 프로그램이 그냥 끝난다 / 최종 답이 없다</strong> → 거부를 <code>break</code>·<code>return</code>·<code>raise</code>로 처리했다.
+        거부는 <strong>"이 행동만 하지 마"</strong>이지 <strong>"일 그만둬"</strong>가 아니다. <code>continue</code>로 <strong>그 블록만 건너뛰고</strong> 루프는 계속 돈다.</li>
+      <li><strong><code>BadRequestError</code>(400) "<code>tool_result.content</code>: Found a number, but <code>tool_result</code> content must either be a string …"</strong> →
+        <code>update_plan</code>이 <code>len(steps)</code>(<strong>숫자</strong>)를 리턴했다. 반환은 <strong>문자열</strong>이어야 한다 — <code>f"계획 저장됨: {len(steps)}단계"</code>.
+        <em>(M3 실습에서 <code>run_tool</code> 반환을 숫자로 둬 이미 한 번 겪은 그 에러다. <code>tool_result</code>의 <code>content</code>는 언제나 문자열.)</em></li>
+      <li><strong><code>EOFError</code>가 나거나, 승인 프롬프트가 뜨자마자 전부 거부된다</strong> → <strong>비대화형 실행</strong>이다(파이프·<code>&lt; /dev/null</code>·CI·백그라운드).
+        <code>confirm()</code>의 <code>except EOFError: return False</code>가 <strong>안전하게 거부</strong>로 처리한 것이다(fail-closed — 의도된 동작).
+        <strong>대화형 터미널</strong>에서 직접 실행한다.</li>
+      <li><strong>승인 프롬프트가 안 뜨고 위험 도구가 그냥 실행된다</strong> → ① <code>DANGEROUS_TOOLS</code>를 <strong>집합이 아니라 문자열</strong>로 선언했다
+        (<code>= "delete_file"</code>이면 <code>in</code>이 <strong>부분 문자열 검사</strong>가 되어 <code>"file"</code>·<code>"delete"</code>에도 True가 된다) → <strong><code>{...}</code> 집합</strong>으로.
+        ② 도구 <strong>이름 오타</strong>(<code>delete-file</code>) → <code>block.name</code>과 <strong>정확히 같은 문자열</strong>이어야 한다.
+        ③ 게이트를 <code>run_tool</code> <strong>호출 뒤에</strong> 뒀다 → 이미 실행된 다음이라 아무 의미가 없다. <strong>반드시 호출 '직전'</strong>.</li>
+      <li><strong><code>[unknown tool: update_plan]</code>이 회신된다</strong> → 루프의 <code>if block.name == "update_plan":</code> 분기가 없어서
+        <code>run_tool</code>로 새어 나갔다(<code>run_tool</code>엔 <code>update_plan</code>이 <strong>일부러</strong> 없다). <strong>핸들러는 루프에</strong> 둔다.</li>
+      <li><strong><code>BadRequestError</code>(400) "<code>tool_use_id</code> …"</strong> → <code>tool_use_id</code>를 <code>block.id</code>가 아닌 다른 값으로 넣었거나,
+        <strong>승인/거부 분기 중 한쪽에서만</strong> 회신했다. <strong>두 분기 모두</strong> 같은 <code>block.id</code>로 <code>tool_result</code>를 만든다.</li>
+      <li><strong>모델이 계획을 안 세우고 바로 도구를 부른다</strong> → <code>SYSTEM</code>에 계획 지시가 빠졌거나, 목표가 <strong>너무 단순</strong>해 모델이 계획이 필요 없다고 판단한 것이다
+        (정상 동작 — 여러 단계가 필요한 목표를 준다). <strong><code>SYSTEM</code>은 '부탁'</strong>이라 100% 강제되지 않는다. <strong>강제는 코드(게이트)</strong>가 한다 — 이 대비가 guardrail의 핵심이다.</li>
+      <li><code>[max_steps=8 도달 …]</code> → 계획 단계가 많으면 <code>update_plan</code>이 1스텝, 각 도구가 1스텝씩 먹어 8을 넘길 수 있다.
+        목표를 작게 하거나 <code>max_steps</code>를 늘린다(M3의 그 가드).</li>
+      <li><code>AuthenticationError</code>(401) → <code>ANTHROPIC_API_KEY</code> 미설정/오타. <code>echo $ANTHROPIC_API_KEY</code>로 확인(step1은 API를 안 부르니 키 없이도 됨).</li>
+    </ul>
+  </div>
+
+  <div class="callout note">
+    <strong>클론으로 이어진다.</strong> 방금 만든 <strong><code>DANGEROUS_TOOLS</code> · <code>confirm()</code> · <code>DENIED_MSG</code> · 게이트 3줄 · 거부 회신(<code>is_error: True</code>) · <code>update_plan</code> 분기</strong>는
+    <strong>이름도 문구도 그대로</strong> Hermes에 들어간다 — <code>DANGEROUS_TOOLS</code>는 <code>config.py</code>로, <code>confirm()</code>과 게이트는 <code>agent.py</code>의 agent loop로,
+    <code>plan</code>은 <code>self.plan</code>이 된다. 달라지는 건 <strong>도구가 가짜가 아니라는 것</strong>뿐이다 —
+    거기선 <code>run_bash</code>가 <strong>진짜 셸</strong>을 돌리고 <code>write_file</code>이 <strong>진짜로 덮어쓴다</strong>. 그래서 <code>y</code>를 누르는 손가락이 무거워진다.
+  </div>
+</section>
+
+        <!-- ========== Hermes 만들기 ========== -->
+<section class="module-section" id="clone">
+  <h2>Hermes 만들기</h2>
+  <p>이번 단계: <em>M3에서 <code>tools.py</code>의 <code>run_bash</code>에 달아 둔 주석
+    <q>실행 전 사용자 승인(<strong>승인 게이트</strong>)은 <strong>M5에서 추가한다</strong></q>를 <strong>회수한다</strong>.</em>
+    M4가 <code>agent.py</code>의 <q>여기가 <code>Memory</code> 자리</q> 주석을 회수했듯, M5는 그 약속을 지키는 모듈이다.
+    Hermes는 목표 한 줄을 받으면 <strong>먼저 계획을 세우고</strong>(<code>update_plan</code>), <strong>되돌리기 어려운 도구는 실행 직전에 묻는다</strong>.
+    개념↔코드 매핑 한 줄: <strong>planning</strong> = <code>TOOLS</code>의 <code>update_plan</code> + <code>self.plan</code>,
+    <strong>guardrail</strong> = <code>config.py</code>의 <code>DANGEROUS_TOOLS</code> + 루프의 <code>if … in DANGEROUS_TOOLS</code>,
+    <strong>approval gate / human-in-the-loop</strong> = <code>confirm()</code>의 <code>input()</code>이 <strong><code>run_tool</code> 호출 직전</strong>에 있다는 사실 그 자체,
+    <strong>거부는 관찰(observation)이다</strong> = <code>is_error: True</code>인 <code>tool_result</code> + <code>continue</code>.</p>
+
+  <div class="callout note">
+    <strong>전제:</strong> M4까지 만든 <code>clone-project/hermes/</code>(<code>config.py</code>, <code>llm.py</code>, <code>tools.py</code>,
+    <code>memory.py</code>, <code>agent.py</code>, <code>__main__.py</code>) 위에 더한다. 이번에 <strong>손대는 파일은 3개</strong>
+    (<code>config.py</code>·<code>tools.py</code>·<code>agent.py</code>) + <strong>상수 1개 확장</strong>(<code>llm.py</code>의 <code>SYSTEM</code>),
+    그리고 <strong><code>memory.py</code>·<code>__main__.py</code>는 한 글자도 안 건드린다</strong>(뒤에서 확인 — 이게 이번 설계의 증거다).
+    <strong>새 파일은 없다.</strong> 참조 해답: <code>clone-project/_solution/05-planning-autonomy/hermes/</code> (막히면 <code>diff</code>로 대조).
+  </div>
+
+  <div class="callout note">
+    <strong>실습과의 관계:</strong> <q>직접 사용해보기</q>에서 <strong>가짜 도구</strong>(<code>list_files</code>·<code>delete_file</code>)로 손에 익힌
+    골격 — <strong>계획 → 안전한 도구는 자동 실행 → 위험한 도구는 게이트 → 승인/거부 분기 → 거부 시 <code>is_error</code> 회신</strong> — 이
+    <strong>그대로</strong> 여기서 반복된다. 달라지는 건 <em>소재</em>뿐이다: 실습의 <strong>가짜</strong> <code>delete_file</code>(아무것도 안 지운다) 자리에
+    Hermes의 <strong>진짜</strong> <code>write_file</code>·<code>run_bash</code>가 들어온다. <code>DANGEROUS_TOOLS</code>·<code>confirm()</code>·<code>DENIED_MSG</code>는
+    <strong>이름도 시그니처도 출력 문구도 실습과 동일</strong>하다.
+  </div>
+
+  <div class="callout warn">
+    <strong>⚠ 대화형 터미널에서 실행할 것:</strong> 이번 모듈은 <code>input()</code>으로 승인을 받는다. 파이프(<code>echo … | uv run python -m hermes</code>),
+    리다이렉트(<code>&lt; /dev/null</code>), CI·백그라운드 실행에서는 <code>input()</code>이 <strong><code>EOFError</code></strong>를 내거나 막힌다.
+    그래서 <code>confirm()</code>은 <code>EOFError</code>를 잡아 <strong><code>False</code>(거부)</strong>를 반환한다 —
+    <strong>fail-closed</strong>(못 물어보면 안 한다). 그리고 이번에도 <strong>진짜 셸·진짜 파일 쓰기</strong>가 돌아간다:
+    <code>run_bash</code>는 승인하면 <strong>임의의 명령을 그대로 실행</strong>하니 신뢰할 수 있는 로컬 환경에서만, 키는 <code>.env</code>/환경변수로만.
+  </div>
+
+  <h3>M4 → M5: <q>묻지 않고 실행</q>에서 <q>계획하고, 위험한 건 묻고 실행</q>으로 (before / after)</h3>
+  <p>지금 무엇을/왜: M4까지 Hermes는 <strong>기억하는 즉흥 실행기</strong>였다 — history는 관리하지만 계획은 없고, 도구는 <strong>묻지 않고</strong> 돌렸다.
+    M5는 <code>agent.py</code> 루프의 <strong><code>run_tool</code> 호출 직전</strong>에 게이트 한 겹을 끼우고, <code>update_plan</code> 분기를 더한다.
+    <strong>while 루프·<code>stop_reason</code> 종료 분기·<code>self.memory</code>·<code>MAX_STEPS</code>는 100% 그대로다.</strong>
+    먼저 바뀌는 지점만 축약해서 나란히 보자(실제 타이핑은 아래 <code>1)~4)</code>에서 한다).</p>
+  <pre><code class="language-python"># BEFORE — M4 agent.py::Hermes.run 의 도구 실행 블록 (개념용 축약)
+            tool_results = []
+            for block in resp.content:
+                if block.type == "tool_use":
+                    print(f"  ↳ step {step}: {block.name}({block.input})")
+                    result = run_tool(block.name, block.input)   # ★ 묻지 않고 바로 실행 (rm도 그대로 돈다)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })</code></pre>
+  <pre><code class="language-python"># AFTER — M5 (개념용 축약: 게이트 + 거부 회신 + update_plan 분기)
+            tool_results = []
+            for block in resp.content:
+                if block.type == "tool_use":
+                    print(f"  ↳ step {step}: {block.name}({block.input})")
+
+                    if block.name in DANGEROUS_TOOLS and not confirm(...):   # ★① 게이트 — 실행 '직전'
+                        tool_results.append({..., "content": DENIED_MSG, "is_error": True})  # ★② 거부도 '회신'
+                        continue                                             #    도구는 실행 안 함
+
+                    if block.name == "update_plan":                          # ★③ 에이전트 자신의 상태
+                        result = self._update_plan(block.input["steps"])
+                    else:
+                        result = run_tool(block.name, block.input)           #    바깥 세상을 바꾸는 도구
+                    tool_results.append({..., "content": result})            # (M4와 동일)</code></pre>
+  <p>교체 포인트는 다섯이다:</p>
+  <ol>
+    <li><strong><code>config.py</code>에 <code>DANGEROUS_TOOLS</code></strong> + <code>agent.py</code>에 모듈 상수 <strong><code>DENIED_MSG</code></strong>·모듈 함수 <strong><code>confirm()</code></strong> 신설.</li>
+    <li><strong><code>self.plan = []</code></strong>(<code>__init__</code>) + <strong><code>_update_plan(steps)</code></strong> 메서드 —
+      <code>self.memory</code>(M4) 옆에 나란히 놓인 <strong>또 하나의 에이전트 상태</strong>.</li>
+    <li><strong>게이트 3줄</strong>(<code>if … in DANGEROUS_TOOLS and not confirm(...)</code>) — <code>run_tool</code> 호출 <strong>직전</strong>에 딱 한 번.</li>
+    <li><strong>거부 회신 + <code>continue</code></strong> — 도구는 안 돌고 <code>tool_result</code>는 간다(<code>is_error: True</code>). <strong>이 모듈의 클라이맥스.</strong></li>
+    <li><strong><code>update_plan</code> 분기</strong> — 그 외 도구는 <code>run_tool</code>로 그대로. <strong>루프 골격은 손도 안 댔다.</strong></li>
+  </ol>
+  <div class="callout why">
+    <strong>왜 게이트가 <q>루프 안 한 곳</q>이면 충분한가:</strong> agent loop에서 <strong>모델의 모든 행동은 예외 없이 <code>tool_use</code> 블록으로 나와
+    이 <code>for</code>문을 통과</strong>한다. 모델이 우리 코드를 우회해 파일을 쓸 방법은 <strong>없다</strong> — 손발이 전부 우리 것이기 때문이다(M2:
+    LLM은 직접 행동하지 못한다). 그래서 <strong>길목 한 곳만 잠그면 에이전트 전체가 잠긴다.</strong> 도구가 10개로 늘어도 게이트는 여전히 이 한 줄이다.
+    이것이 guardrail을 <strong>프롬프트가 아니라 코드</strong>에, 그리고 <code>tools.py</code>가 아니라 <strong>loop</strong>에 두는 이유다 —
+    <code>tools.py</code>는 <strong>능력</strong>(무엇을 할 수 있는가), <code>agent.py</code>는 <strong>정책</strong>(무엇을 할 것인가).
+  </div>
+
+  <h3>1) hermes/config.py — <code>DANGEROUS_TOOLS</code> 추가</h3>
+  <p>지금 무엇을/왜: <strong>어떤 도구에 게이트를 걸 것인가</strong>를 상수로 못 박는다. 판단 기준은 딱 하나 — <strong>되돌릴 수 있는가(reversibility)</strong>.
+    <code>MAX_STEPS</code>·<code>COMPACT_THRESHOLD</code> 옆, <code>config.py</code> <strong>맨 아래에 이어서</strong> 추가한다.</p>
+  <pre><code class="language-python"># hermes/config.py  (맨 아래에 이어서 추가)
+
+# M5 — Planning &amp; Autonomy: 승인 게이트(guardrail)를 걸 '위험 도구' 목록
+# 기준은 "되돌릴 수 있는가?" — read_file은 읽기만 하니 잘못 돌아도 되돌릴 게 없다(자동 실행).
+# write_file은 덮어쓰고, run_bash는 뭐든 할 수 있다(rm 포함) → 실행 전 사람에게 묻는다.
+DANGEROUS_TOOLS = {"write_file", "run_bash"}   # 반드시 집합(set) — 문자열로 쓰면 in이 부분문자열 검사가 된다</code></pre>
+  <div class="callout why">
+    <strong><code>read_file</code>은 왜 빠졌나:</strong> 읽기는 <strong>되돌릴 게 없다</strong> — 잘못 읽어도 세상은 그대로다. 그래서 자동 실행이다.
+    반면 <code>write_file</code>은 <strong>덮어쓰고</strong>, <code>run_bash</code>는 <strong>뭐든 할 수 있다</strong>(<code>rm</code> 포함).
+    일반화하면 <strong>파일 덮어쓰기 · 셸 실행 · 삭제 · 외부 전송(네트워크·메일·결제)</strong>이 되돌리기 어려운 축이다.
+    <code>update_plan</code>도 안 들어간다 — 파이썬 변수 하나 바꾸는 게 전부라 <strong>되돌릴 게 없으니 물을 이유도 없다</strong>.
+    <strong>승인을 남발하면 자율성이 죽는다</strong>(뒤의 <q>트레이드오프</q> 참고).
+  </div>
+
+  <h3>2) hermes/tools.py — <code>update_plan</code> <em>스키마만</em> + <code>run_bash</code> 주석 회수</h3>
+  <p>지금 무엇을/왜: 모델에게 <q><code>update_plan</code>이라는 도구가 있다</q>고 알리는 <strong>스키마(모델과의 계약)</strong>를 <code>TOOLS</code>에 추가한다.
+    <strong>구현(핸들러)은 여기 두지 않는다</strong> — 그건 <code>agent.py</code>의 몫이다(이유는 바로 아래). <code>TOOLS</code> 리스트의 마지막 원소
+    (<code>run_bash</code>) <strong>다음</strong>, 리스트를 닫는 <code>]</code> <strong>앞</strong>에 이어서 추가한다.</p>
+  <pre><code class="language-python"># hermes/tools.py  (TOOLS 리스트 안 — run_bash 원소 다음에 이어서 추가)
+
+    # M5 — update_plan: '계획'을 기록하는 도구. 여긴 스키마(모델과의 계약)만 둔다.
+    # 실제 핸들러는 agent.py에 있다(아래 run_tool 주석 참고).
+    {
+        "name": "update_plan",
+        "description": "현재 작업 계획(단계 목록)을 기록/갱신한다. 여러 단계가 필요한 목표를 받으면 "
+                       "가장 먼저 이 도구로 계획을 세우고 시작한다. 계획이 바뀌면 다시 호출한다.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",                      # ← M5 신규: 지금까지의 도구는 전부 string 인자였다
+                    "items": {"type": "string"},
+                    "description": "실행할 단계들. 각 항목은 한 줄짜리 행동, 예: 'README.md를 읽는다'",
+                },
+            },
+            "required": ["steps"],
+        },
+    },</code></pre>
+  <div class="callout note">
+    <strong>첫 <code>array</code> 타입 <code>input_schema</code>:</strong> M2~M4의 도구 인자는 전부 <strong>string</strong>이었다
+    (<code>path</code>·<code>content</code>·<code>cmd</code>). <code>steps</code>는 <strong>문자열의 배열</strong>이다 —
+    <code>{"type": "array", "items": {"type": "string"}}</code>. <code>input_schema</code>는 그냥 JSON Schema이므로
+    배열·중첩 객체도 그대로 쓸 수 있고, 모델은 이 스키마를 보고 <code>block.input["steps"]</code>를 <strong>파이썬 리스트</strong>로 채워 준다.
+  </div>
+
+  <p>지금 무엇을/왜: <strong><code>run_tool</code> 디스패처는 손대지 않는다.</strong> 대신 <q>왜 여기 없는지</q>를 주석으로 남긴다 —
+    안 그러면 나중에 <code>[unknown tool: update_plan]</code>을 보고 헤맨다(실제로 <code>run_tool("update_plan", …)</code>은 그 문자열을 돌려준다).
+    <code>run_tool</code>의 docstring <strong>바로 아래에 주석 2줄만</strong> 추가한다.</p>
+  <pre><code class="language-python"># hermes/tools.py  (run_tool — docstring 아래에 주석 2줄 추가. 분기는 그대로 둔다)
+
+def run_tool(name: str, tool_input: dict) -&gt; str:
+    """도구 이름으로 실제 함수를 부르는 디스패처.
+    반환은 반드시 문자열 — 그대로 tool_result 의 content 로 들어간다."""
+    # update_plan은 여기(run_tool)가 아니라 agent.py가 처리한다 —
+    # 바깥 세상이 아니라 '에이전트 자신의 상태(self.plan)'를 바꾸는 도구이기 때문이다(M5 설계).
+    if name == "read_file":
+        return read_file(tool_input["path"])
+    if name == "write_file":
+        return write_file(tool_input["path"], tool_input["content"])
+    if name == "run_bash":
+        return run_bash(tool_input["cmd"])
+    return f"[unknown tool: {name}]"</code></pre>
+  <div class="callout why">
+    <strong>한 줄 규칙 — <q>바깥 세상을 바꾸는 도구는 <code>tools.py</code>, 에이전트 자신의 상태를 바꾸는 도구는 <code>agent.py</code></q>:</strong>
+    <code>read_file</code>·<code>write_file</code>·<code>run_bash</code>는 <strong>디스크와 셸</strong>(바깥 세상)을 건드린다.
+    <code>update_plan</code>은 <strong><code>self.plan</code></strong>(에이전트 내부)을 바꾼다 — <code>self.memory</code>(M4)와 <strong>같은 부류</strong>다.
+    에이전트의 상태는 <strong>에이전트가 소유</strong>한다. 그래서 <strong>스키마는 <code>tools.py</code></strong>(모든 도구 명세는 한 곳에 모인다),
+    <strong>핸들러는 <code>agent.py</code></strong>. 승인 게이트(정책)가 <code>agent.py</code>에 있는 것과 <strong>정확히 같은 이유</strong>다 —
+    <em>정책과 상태는 루프가 소유하고, 효과는 도구가 소유한다.</em>
+  </div>
+
+  <p>지금 무엇을/왜: <strong>★ M3의 약속을 회수한다.</strong> M3에서 <code>run_bash</code>를 만들 때 docstring에 이렇게 적어 뒀다 —
+    <q>실행 전 사용자 승인(승인 게이트)은 <strong>M5에서 추가한다</strong>.</q> 이번이 그 M5다. 함수 <strong>본체는 그대로</strong>이고
+    (여전히 검증 없이 실행한다!) <strong>주석만</strong> 현실을 반영하도록 갱신한다.</p>
+  <pre><code class="language-python"># BEFORE — M3에서 달아 둔 예고 (이 두 줄을 지운다)
+    실행 전 사용자 승인(승인 게이트)은 M5에서 추가한다. 지금은 신뢰할 수 있는
+    로컬 학습 환경에서만 쓴다.</code></pre>
+  <pre><code class="language-python"># AFTER — hermes/tools.py 의 run_bash docstring (본체는 한 글자도 안 바뀐다)
+
+def run_bash(cmd: str) -&gt; str:
+    """셸 명령을 실행하고 stdout(+stderr)을 문자열로 반환한다.
+
+    ⚠️ 위험 — 학습용. 모델이 요청한 임의의 셸 명령을 '검증 없이 그대로' 실행한다.
+    rm 같은 파괴적 명령도 그대로 돌아가므로 실제 서비스에선 절대 금물이다.
+
+    M5(약속 회수): 이 함수는 '여전히' 검증 없이 실행한다 — 대신 agent.py의 승인 게이트가
+    호출 '직전'에 사람에게 y/n을 묻는다(config.DANGEROUS_TOOLS). 도구는 '능력'만 갖고,
+    무엇을 실행할지의 '정책'은 agent loop가 쥔다. 승인하면 위험은 그대로이니
+    신뢰할 수 있는 로컬 학습 환경에서만 쓴다.
+    """
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    return (result.stdout + result.stderr) or "(출력 없음)"   # 빈 문자열이면 400 → 대체 문구</code></pre>
+  <div class="callout note">
+    <strong>도구 함수 안에 <code>input()</code>을 넣지 않는 이유:</strong> <code>run_bash</code> 안에서 직접 물어보면 그 함수는
+    <strong>단위 테스트도 못 하고</strong>(입력을 기다리며 멈춘다) <strong>다른 곳에서 재사용도 못 한다</strong>. 승인은 <strong>정책</strong>이고,
+    정책은 <strong>루프</strong>에 있어야 한다. <code>read_file</code>이라는 함수 자체는 승인의 존재를 알 필요가 없다.
+  </div>
+
+  <h3>3) hermes/llm.py — <code>SYSTEM</code> 확장 (부탁)</h3>
+  <p>지금 무엇을/왜: 모델이 <strong>먼저 계획을 세우도록 유도</strong>하고, <strong>거부당했을 때 어떻게 굴지</strong>를 일러둔다.
+    함수 추가도 시그니처 변경도 없다 — <strong><code>SYSTEM</code> 문자열만</strong> 늘린다(한 줄 → 여러 줄 <code>"""…"""</code>).
+    M4에서 배운 <q>persona(<code>system</code>)는 history 밖 항구 규칙이라 compaction에도 안 사라진다</q>가 여기서 실제로 쓰인다:
+    <strong>M5는 <code>system</code>이 <q>말투</q>를 넘어 <q>정책</q>이 되는 첫 모듈</strong>이다.</p>
+  <pre><code class="language-python"># BEFORE — M1~M4의 SYSTEM (한 줄)
+SYSTEM = "너는 Hermes라는 간결한 한국어 도우미야. 군더더기 없이 핵심만 답한다."</code></pre>
+  <pre><code class="language-python"># AFTER — hermes/llm.py 의 SYSTEM (문자열만 확장. ask/chat/stream_chat는 그대로)
+
+# M5: persona(말투) 뒤에 '행동 정책' 두 문단이 붙었다 — system은 history 밖 항구 규칙이라
+# compaction(M4)에도 안 사라지므로 정책을 두기 좋은 자리다.
+# ⚠️ 단, 이건 '부탁'이다. 모델이 안 지킬 수도 있다. 강제는 코드가 한다 —
+#    agent.py의 승인 게이트(DANGEROUS_TOOLS)가 진짜 guardrail이다.
+SYSTEM = """너는 Hermes라는 간결한 한국어 도우미야. 군더더기 없이 핵심만 답한다.
+
+여러 단계가 필요한 목표를 받으면, 가장 먼저 update_plan 도구로 계획(단계 목록)을 세운 뒤 실행을 시작한다.
+계획이 바뀌면 update_plan을 다시 호출해 갱신한다.
+write_file·run_bash처럼 되돌리기 어려운 도구는 사용자 승인이 필요하다. 거부당하면 같은 도구를 억지로
+다시 부르지 말고, 다른 방법을 찾거나 사용자에게 무엇을 원하는지 물어본다."""</code></pre>
+  <div class="callout warn">
+    <strong>★ 이건 <q>부탁</q>이지 <q>강제</q>가 아니다:</strong> <code>SYSTEM</code>에 <q>위험한 도구는 승인이 필요하다</q>고 적어도,
+    모델은 <strong>그냥 안 지킬 수 있다</strong>(그리고 모델은 승인을 <em>스스로</em> 받을 수도 없다 — 물어보는 건 우리 코드다).
+    이 문단이 하는 일은 <strong>행동을 유도</strong>하고(계획부터 세우게), 거부당했을 때 <strong>무한 재시도를 줄이는</strong> 것뿐이다.
+    실제로 <strong>막는 것은 다음 단계의 코드</strong>(<code>if block.name in DANGEROUS_TOOLS</code>)다.
+    <em>클라이언트 검증(부탁) vs 서버 검증(강제) — 우린 서버다.</em>
+  </div>
+
+  <h3>4) hermes/agent.py — 게이트 + 거부 회신 + <code>self.plan</code> (★ 이 모듈의 핵심)</h3>
+  <p>지금 무엇을/왜: 이제 <strong>정책</strong>과 <strong>상태</strong>를 루프에 붙인다. 조각으로 하나씩 쌓아 가자.
+    먼저 <strong>파일 머리</strong> — 모듈 docstring에 M5 문단을 더하고(선택), <code>import</code>에 <code>DANGEROUS_TOOLS</code>를 추가한다.</p>
+  <pre><code class="language-python"># hermes/agent.py  (모듈 docstring 맨 끝에 이어서 — 선택이지만 권장)
+
+M5: 루프의 '행동(Act)' 단계 바로 앞에 승인 게이트(guardrail)를 끼우고, 계획을
+'에이전트 자신의 상태'(self.plan)로 들고 있는다. 모델의 모든 행동은 예외 없이
+tool_use 블록으로 나와 아래 for 문을 지나가므로, 이 길목 한 곳만 잠그면 에이전트
+전체가 잠긴다. while·stop_reason 분기·self.memory·MAX_STEPS는 손대지 않았다."""</code></pre>
+
+  <p>지금 무엇을/왜: <code>import</code> 한 줄 갱신 + <strong>모듈 상수 <code>DENIED_MSG</code></strong>와
+    <strong>모듈 함수 <code>confirm()</code></strong> 신설. 둘 다 <code>class Hermes</code> <strong>위</strong>, <code>import</code> 아래에 놓는다.
+    <code>confirm()</code>이 <strong>클래스 밖</strong>인 이유는 Hermes의 상태를 하나도 안 쓰기 때문이다(순수한 <q>사람에게 묻기</q>).</p>
+  <pre><code class="language-python"># hermes/agent.py  (import 갱신 + class Hermes 위에 상수/함수 신설)
+from .llm import client, SYSTEM
+from .config import MODEL, MAX_TOKENS, MAX_STEPS, DANGEROUS_TOOLS   # M5: DANGEROUS_TOOLS 추가
+from .tools import TOOLS, run_tool
+from .memory import Memory
+
+
+# M5 — 거부당했을 때 모델에게 돌려줄 '관찰(observation)' 문구.
+# 그냥 "거부됨"이 아니라 '다음에 뭘 하라'까지 넣는다 — 안 그러면 모델이 같은 도구를 무한 재시도한다.
+DENIED_MSG = "사용자가 이 도구 실행을 거부했습니다. 다른 방법을 찾거나 사용자에게 물어보세요."
+
+
+def confirm(name: str, tool_input: dict) -&gt; bool:
+    """위험 도구 실행 '직전'에 사람에게 y/n을 묻는다 (human-in-the-loop).
+
+    기본값은 거부([y/N]) — 되돌리기 어려운 행동의 안전한 기본값은 '안 함'이다.
+    비대화형 실행(파이프/CI)에선 input()이 EOFError를 내므로 거부로 처리한다(fail-closed).
+    """
+    print(f"  [승인 요청] {name}({tool_input})")
+    try:
+        answer = input("  실행할까요? [y/N] ").strip().lower()
+    except EOFError:
+        return False          # 못 물어보면 '안 한다' — fail-closed
+    return answer == "y"      # y 외에는 전부 거부 (그냥 Enter도 거부)</code></pre>
+  <div class="callout why">
+    <strong>fail-closed — 게이트는 넘어질 때 <q>거부</q> 쪽으로 넘어져야 한다:</strong> 프롬프트가 <code>[y/N]</code>인 건 장식이 아니다.
+    <strong>대문자 N이 기본값</strong> — 그냥 Enter를 치면 <code>answer == ""</code>라 <code>False</code>(거부)다.
+    비대화형 실행에서 <code>input()</code>이 <code>EOFError</code>를 내도 <code>False</code>다. 되돌리기 어려운 행동의 <strong>안전한 기본값은 <q>안 함</q></strong>이다
+    (<code>rm -i</code>와 같은 철학). 덤으로 — <strong>Enter만 쳐도 거부 경로가 나오므로</strong>, 뒤의 <q>2회차</q> 실험을 아주 쉽게 할 수 있다.
+  </div>
+
+  <p>지금 무엇을/왜: <code>class Hermes</code> 안이다. <code>__init__</code>에 <strong><code>self.plan</code> 한 줄</strong>을 더하고
+    (<code>self.memory</code> 바로 아래), <code>update_plan</code> 도구의 실체인 <strong><code>_update_plan</code> 메서드</strong>를 신설한다.</p>
+  <pre><code class="language-python"># hermes/agent.py  (class Hermes 안 — __init__에 한 줄 추가 + _update_plan 메서드 신설)
+
+class Hermes:
+    def __init__(self):
+        # M3까진 self.messages = [] (평범한 list)였다. M4에서 그 자리를 Memory로 교체 —
+        # 자기 크기를 알고(token_estimate) 스스로 줄이는(compact) 객체가 history를 소유한다.
+        self.memory = Memory()
+        # M5: 현재 계획. self.memory 옆에 나란히 놓인 '에이전트 자신의 상태'다 —
+        # 바깥 세상(파일·셸)이 아니라 에이전트 내부를 바꾸므로 tools.py가 아니라 여기 산다.
+        self.plan = []
+
+    def _update_plan(self, steps: list) -&gt; str:
+        """update_plan 도구의 실체 — 부작용 없는 '상태 기록' 도구다.
+        파일도 셸도 네트워크도 건드리지 않는다. 모델이 자기 생각을 밖으로 꺼내
+        (externalize) 우리도 모델도 볼 수 있게 만드는 장치일 뿐 — 마법이 아니다."""
+        self.plan = steps
+        print(f"  [plan] {len(steps)}단계")
+        for i, s in enumerate(steps, 1):
+            print(f"    {i}. {s}")
+        return f"계획 저장됨: {len(steps)}단계"   # 반드시 '문자열' — tool_result content 규칙(M2)</code></pre>
+  <div class="callout warn">
+    <strong>★ 반환은 <em>반드시</em> 문자열:</strong> <code>return len(steps)</code>처럼 <strong>숫자</strong>를 돌려주면 그 값이 그대로
+    <code>tool_result</code>의 <code>content</code>로 들어가 다음 호출이 <strong>400</strong>
+    (<code>tool_result.content: Found a number …</code>)이다. <strong>M3 실습에서 이미 겪은 그 에러</strong>다 —
+    <code>content</code>는 <strong>문자열</strong>이어야 한다(M2 규칙). 그래서 <code>f"계획 저장됨: {len(steps)}단계"</code>.
+  </div>
+  <div class="callout why">
+    <strong><code>update_plan</code>은 마법이 아니다:</strong> 이 메서드가 하는 일의 <strong>전부</strong>는 —
+    ① <code>steps</code>를 <code>self.plan</code>에 저장, ② 화면에 출력, ③ 문자열 하나 반환. <strong>끝.</strong>
+    파일도 셸도 안 건드린다. 그런데도 효과가 있는 이유는 둘이다:
+    <strong>① 생각의 외부화</strong> — 모델이 계획을 <em>말로 뱉는 행위 자체</em>가 <code>tool_use</code>/<code>tool_result</code>로
+    <strong>history에 남아</strong>(M4의 <code>self.memory</code>) 이후 스텝의 실행을 일관되게 만든다.
+    <strong>② 관찰 가능성</strong> — <code>print</code> 덕분에 <strong>우리가</strong> 에이전트의 의도를 <em>실행 전에</em> 볼 수 있다.
+    (계획을 <strong>강제로</strong> 순서대로 실행시키는 executor는 <em>다른 설계</em>이고, 이 모듈의 범위 밖이다.
+    <code>self.plan</code>은 어디까지나 우리 쪽 파이썬 변수일 뿐 — 모델을 실제로 움직이는 건 history에 남은 그 호출 기록이다.)
+  </div>
+
+  <p>지금 무엇을/왜: <strong>드디어 게이트다.</strong> <code>run()</code> 안, <code>tool_results = []</code>부터 시작하는 <code>for</code> 블록을
+    아래로 <strong>교체</strong>한다. <code>run()</code>의 나머지(<code>self.memory.append</code>, <code>while step &lt; MAX_STEPS</code>,
+    <code>client.messages.create(...)</code>, <code>stop_reason</code> 종료 분기)는 <strong>한 글자도 안 바뀐다</strong>.</p>
+  <pre><code class="language-python"># hermes/agent.py  (run() 안 — 도구 실행 for 블록을 이걸로 교체. 위아래는 M4 그대로)
+
+            # tool_use 블록마다 실행해 tool_result 수집 — M2의 왕복 그대로.
+            # M5: 다만 '행동(Act)' 바로 앞에 승인 게이트가 하나 섰다(★).
+            tool_results = []
+            for block in resp.content:
+                if block.type == "tool_use":
+                    print(f"  ↳ step {step}: {block.name}({block.input})")  # 루프가 도는 걸 눈으로
+
+                    # ★ M5 ① 승인 게이트 — run_tool '직전'. 정책 판단이 실행 분기보다 먼저 온다.
+                    if block.name in DANGEROUS_TOOLS and not confirm(block.name, block.input):
+                        print("  [거부됨] 실행하지 않고, 거부 사실을 모델에게 알립니다.")
+                        # ★ M5 ② 거부해도 tool_use 하나당 tool_result 하나! (M2 규칙 — 빠지면 400)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,   # tool_use 의 id와 반드시 매칭
+                            "content": DENIED_MSG,     # 문자열 — '거부됨'이 하나의 관찰이 된다
+                            "is_error": True,          # 실패/거부임을 알리는 필드
+                        })
+                        continue                       # 도구는 실행 안 함. 루프는 계속 돈다.
+
+                    # ★ M5 ③ update_plan은 '에이전트 자신의 상태'를 바꾼다 → tools.py가 아니라 여기서.
+                    if block.name == "update_plan":
+                        result = self._update_plan(block.input["steps"])
+                    else:
+                        result = run_tool(block.name, block.input)   # 바깥 세상을 바꾸는 도구
+
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,   # tool_use 의 id와 반드시 매칭
+                        "content": result,          # 반드시 문자열
+                    })</code></pre>
+
+  <div class="callout warn">
+    <strong>★ 이 모듈의 대표 함정 — 거부해도 <code>tool_result</code>는 반드시 회신한다:</strong>
+    사람이 거부하면 도구는 안 돈다. <strong>하지만 모델은 이미 <code>tool_use</code> 블록을 냈고</strong>, 그건 이미
+    history(<code>self.memory</code>)에 들어갔다. M2에서 배운 <strong><code>tool_use</code> 하나당 <code>tool_result</code> 하나</strong> 규칙은
+    <strong>거부해도 그대로 유효</strong>하다 — 짝을 빠뜨리면 다음 <code>create</code>가 <strong>400</strong>
+    (<code>tool_use ids … without tool_result blocks</code>)이다.
+    그래서 거부의 올바른 처리는 <q>아무것도 안 보내기</q>가 아니라 <strong><q>안 하고 나서, 안 했다고 말하기</q></strong>다:
+    도구는 <strong>실행하지 않고</strong>(<code>continue</code>) <code>is_error: True</code>인 <code>tool_result</code>만 회신한다.
+    <strong>흔한 오답 3종:</strong>
+    ① <s>거부했으니 <code>tool_results</code>에 아무것도 안 넣는다</s> → <strong>400.</strong>
+    ② <s>거부했으니 루프를 <code>break</code>/예외로 탈출한다</s> → 에이전트가 <strong>죽는다</strong>. 거부는 <q>이 행동만 하지 마</q>이지 <q>일 그만둬</q>가 아니다.
+    ③ <s>거부 사실을 안 알리고 빈 문자열을 회신한다</s> → 모델이 <strong>성공한 줄 알고</strong> 다음 단계로 간다(더 나쁘다).
+  </div>
+  <div class="callout why">
+    <strong>거부는 에러가 아니라 하나의 <q>관찰(observation)</q>이다:</strong> ReAct(M3)의 <strong>추론 → 행동 → 관찰</strong>에서,
+    거부는 <strong>관찰 자리에 <q>실패/거부</q>가 들어가는 것</strong>일 뿐이다. 모델은 그걸 읽고 <strong>스스로 적응</strong>한다 —
+    다른 방법을 시도하거나, 사용자에게 <q>그럼 어떻게 할까요?</q>라고 되묻거나, 그 단계를 건너뛴다.
+    <strong>그래서 거부해도 루프가 안 깨진다.</strong> analogy: 실패한 syscall이 예외를 던지지 않고 <strong>에러 코드를 리턴</strong>하는 것 —
+    호출자(모델)가 그걸 보고 분기한다. <em>에이전트를 안전하게 만드는 것과 에이전트를 망가뜨리는 것은 다르다.</em>
+  </div>
+  <div class="callout note">
+    <strong>순서 규칙 — 게이트가 <code>update_plan</code> 분기보다 <em>먼저</em>:</strong> 정책 판단(<code>if … in DANGEROUS_TOOLS</code>)이
+    실행 분기(<code>if block.name == "update_plan"</code>)보다 <strong>위</strong>에 온다. 그래야 나중에 도구가 늘어도
+    <strong>게이트를 지나쳐 실행될 일이 없다</strong>(fail-closed 읽기). <code>run_tool</code>로 가든 <code>_update_plan</code>으로 가든,
+    <strong>모든 행동은 게이트를 먼저 통과</strong>한다.
+  </div>
+
+  <h3>5) 무변경 확인 — <code>memory.py</code> · <code>__main__.py</code></h3>
+  <p>지금 무엇을/왜: <strong>가드레일을 붙였는데 메모리와 진입점은 안 건드린다.</strong> 이게 <q>길목 한 곳만 잠그면 전체가 잠긴다</q>의 증거다.
+    <code>Memory</code>(M4)는 그대로 돌고 — 계획도 승인 요청도 결국 history에 쌓이고, 길어지면 compaction된다 —
+    REPL의 <code>hermes = Hermes(); hermes.run(user)</code>도 그대로다. <strong>승인 프롬프트는 <code>hermes.run()</code> <em>안에서</em> 뜨는
+    <q>중첩된 입력</q></strong>이다: <code>__main__.py</code>의 <code>input("you&gt; ")</code>와 <code>confirm()</code>의 <code>input("  실행할까요? [y/N] ")</code>이
+    같은 stdin을 <strong>순차로</strong> 읽으므로, 대화형 터미널에선 문제없이 번갈아 동작한다. <strong>두 파일 모두 수정 없음.</strong></p>
+  <p>제대로 했다면 M4 대비 바뀐 파일은 <strong>정확히 4개</strong>여야 한다:</p>
+  <pre><code class="language-bash">cd clone-project
+diff -rq _solution/04-memory-context/hermes _solution/05-planning-autonomy/hermes</code></pre>
+  <pre class="output">Files …/04-memory-context/hermes/agent.py and …/05-planning-autonomy/hermes/agent.py differ
+Files …/04-memory-context/hermes/config.py and …/05-planning-autonomy/hermes/config.py differ
+Files …/04-memory-context/hermes/llm.py and …/05-planning-autonomy/hermes/llm.py differ
+Files …/04-memory-context/hermes/tools.py and …/05-planning-autonomy/hermes/tools.py differ</pre>
+  <p><code>memory.py</code>·<code>__main__.py</code>·<code>__init__.py</code>는 <strong>목록에 없다</strong> — 바이트 단위로 동일하다.</p>
+
+  <h3>돌려보기 — <strong>M3의 그 태스크를, 이번엔 계획하고 물어보면서</strong></h3>
+  <p>M3에서 이미 돌려 본 바로 그 태스크를 다시 준다. <strong>같은 태스크·같은 루프인데 행동이 눈에 보이고 통제된다</strong> — 그게 M5가 더한 전부이자 핵심이다.
+    <strong>반드시 대화형 터미널에서</strong> 실행한다(파이프·리다이렉트 금지).</p>
+  <pre><code class="language-bash">cd clone-project
+uv run python -m hermes</code></pre>
+
+  <p><strong>1회차 — 둘 다 승인(<code>y</code>):</strong></p>
+  <pre class="output">Hermes REPL — 빈 입력 또는 'exit'로 종료 (이제 도구를 여러 스텝 이어 쓴다)
+
+you&gt; 이 폴더의 .py 파일 목록을 정리해서 files.txt로 저장해줘
+  ↳ step 1: update_plan({'steps': ['셸로 이 폴더의 .py 파일 목록을 조회한다', '목록을 정리한다', 'files.txt로 저장한다']})
+  [plan] 3단계
+    1. 셸로 이 폴더의 .py 파일 목록을 조회한다
+    2. 목록을 정리한다
+    3. files.txt로 저장한다
+  ↳ step 2: run_bash({'cmd': 'ls hermes/*.py'})
+  [승인 요청] run_bash({'cmd': 'ls hermes/*.py'})
+  실행할까요? [y/N] y
+  ↳ step 3: write_file({'path': 'files.txt', 'content': 'hermes/__init__.py\nhermes/__main__.py\n...'})
+  [승인 요청] write_file({'path': 'files.txt', 'content': 'hermes/__init__.py\nhermes/__main__.py\n...'})
+  실행할까요? [y/N] y
+hermes&gt; files.txt에 .py 파일 목록(7개)을 저장했어요.
+you&gt; exit
+bye.</pre>
+  <p>M3에서는 이 태스크가 <strong>아무 말 없이 그냥 돌았다</strong>(<code>run_bash</code> → <code>write_file</code>, 끝).
+    지금은 <strong>계획이 먼저 뜨고</strong>(<code>[plan] 3단계</code>), <strong>셸과 파일 쓰기에서 두 번 묻는다</strong>. 파일이 실제로 생겼는지 확인:</p>
+  <pre><code class="language-bash">cat files.txt</code></pre>
+
+  <p><strong>★ 2회차 — <code>write_file</code>에서 거부(그냥 <code>Enter</code>): 이게 M5의 클라이맥스다.</strong>
+    REPL을 다시 띄우고 <strong>같은 목표</strong>를 준 뒤, <code>run_bash</code>는 <code>y</code>로 승인하고 <strong><code>write_file</code>에서는 그냥 Enter</strong>를 친다.</p>
+  <pre class="output">you&gt; 이 폴더의 .py 파일 목록을 정리해서 files.txt로 저장해줘
+  ↳ step 1: update_plan({'steps': ['.py 파일 목록을 조회한다', 'files.txt로 저장한다']})
+  [plan] 2단계
+    1. .py 파일 목록을 조회한다
+    2. files.txt로 저장한다
+  ↳ step 2: run_bash({'cmd': 'ls hermes/*.py'})
+  [승인 요청] run_bash({'cmd': 'ls hermes/*.py'})
+  실행할까요? [y/N] y
+  ↳ step 3: write_file({'path': 'files.txt', 'content': 'hermes/__init__.py\n...'})
+  [승인 요청] write_file({'path': 'files.txt', 'content': 'hermes/__init__.py\n...'})
+  실행할까요? [y/N]            ← 그냥 Enter (= 거부)
+  [거부됨] 실행하지 않고, 거부 사실을 모델에게 알립니다.
+hermes&gt; files.txt 저장은 취소했습니다. 목록은 아래와 같아요 — 다른 경로에 저장할까요, 아니면 화면으로만 볼까요?
+hermes/__init__.py
+hermes/__main__.py
+hermes/agent.py
+...
+you&gt; exit
+bye.</pre>
+  <div class="callout why">
+    <strong>방금 무슨 일이 있었나:</strong> <code>write_file</code>은 <strong>실행되지 않았다</strong>(파일이 안 생겼다 — <code>ls files.txt</code>로 확인해 보라).
+    그런데 <strong>Hermes는 죽지 않았다.</strong> 게이트가 <code>continue</code>로 도구를 건너뛰고
+    <code>{"type": "tool_result", "tool_use_id": …, "content": DENIED_MSG, "is_error": True}</code>를 <strong>회신</strong>했고 →
+    그 <q>거부됨</q>이 ReAct의 <strong>관찰</strong> 자리에 들어가 → 다음 스텝에서 모델이 그걸 읽고 <strong>스스로 적응</strong>했다
+    (저장을 포기하고, 목록을 화면에 보여 주며 <strong>되물었다</strong>). <strong>거부는 크래시가 아니라 관찰이다</strong> — 이 한 조각이
+    <q>안전한 에이전트</q>와 <q>망가진 에이전트</q>를 가른다.
+    (모델이 고르는 명령·계획 단계 수·적응 방식은 매번 조금씩 다르다 — 위 숫자와 문구는 예시다.)
+  </div>
+
+  <div class="callout why">
+    <strong>개념↔코드 매핑(한눈에):</strong>
+    <ul>
+      <li><strong>planning</strong> = <code>TOOLS</code>의 <code>update_plan</code> 스키마 + 상태 <code>self.plan</code>.</li>
+      <li><strong>계획의 외부화</strong> = <code>_update_plan</code>의 <code>print</code>(우리가 본다) + history에 남는 <code>tool_use</code>/<code>tool_result</code>(모델이 본다).</li>
+      <li><strong>autonomy</strong> = M3의 while 루프(엔진은 이미 있었다) + <code>SYSTEM</code>의 <strong>방향</strong>(먼저 계획하라) + 게이트라는 <strong>한계</strong>.</li>
+      <li><strong>guardrail</strong> = <code>config.py</code>의 <code>DANGEROUS_TOOLS</code> + 루프의 <code>if block.name in DANGEROUS_TOOLS</code> (프롬프트가 아니라 <strong>코드</strong>).</li>
+      <li><strong>approval gate / human-in-the-loop</strong> = <code>confirm()</code>의 <code>input()</code>이 <strong><code>run_tool</code> 호출 직전</strong>에 있다는 사실 그 자체.</li>
+      <li><strong>거부는 관찰이다</strong> = <code>is_error: True</code> <code>tool_result</code> + <code>continue</code> (도구는 안 돌고, 회신은 간다).</li>
+      <li><strong>fail-closed</strong> = <code>[y/N]</code> 기본 거부 + <code>except EOFError: return False</code>.</li>
+      <li><strong>정책·상태는 루프가, 효과는 도구가</strong> = 게이트와 <code>_update_plan</code>이 <strong>둘 다</strong> <code>agent.py</code>에 있고,
+        <code>read_file</code>/<code>write_file</code>/<code>run_bash</code>는 <code>tools.py</code>에 있는 것.</li>
+    </ul>
+  </div>
+
+  <div class="callout warn">
+    <strong>막히면:</strong>
+    <strong>★ 거부했더니 400</strong>(<code>tool_use ids … without tool_result blocks</code>) — 거부 시 <code>tool_results</code>에
+    <strong>아무것도 안 넣고</strong> <code>continue</code>했다. <strong>거부해도 <code>tool_result</code> 하나는 반드시 회신</strong>한다(<code>is_error: True</code>). M2의 1:1 규칙.
+    <strong><code>[unknown tool: update_plan]</code>이 회신된다</strong> — <code>agent.py</code>에 <code>if block.name == "update_plan":</code> 분기가 없어
+    <code>run_tool</code>로 새어 나갔다. <strong>핸들러는 <code>agent.py</code></strong>(<code>tools.py</code>엔 스키마만).
+    <strong><code>tool_result.content: Found a number …</code> 400</strong> — <code>_update_plan</code>이 <code>len(steps)</code>(숫자)를 리턴했다.
+    <strong>반환은 문자열</strong> — <code>f"계획 저장됨: {len(steps)}단계"</code>. <em>M3 실습에서 이미 겪은 그 에러다.</em>
+    <strong>승인 프롬프트가 안 뜨고 그냥 실행된다</strong> — <code>DANGEROUS_TOOLS</code>가 <strong>집합(set)</strong>이 아니라
+    <strong>문자열</strong>(<code>DANGEROUS_TOOLS = "write_file"</code>)이거나 도구 이름에 오타. 문자열이면 <code>in</code>이
+    <strong>부분문자열 검사</strong>가 돼 <code>run_bash</code>는 영영 안 걸린다. <code>{…}</code> 중괄호를 확인.
+    <strong>계획을 안 세우고 바로 도구를 부른다</strong> — <code>SYSTEM</code>에 계획 지시가 안 들어갔거나, 목표가 <strong>너무 단순</strong>해서
+    모델이 계획이 필요 없다고 판단한 것(<strong>정상 동작</strong>이다 — 여러 단계가 필요한 목표를 줘 본다).
+    프롬프트는 <strong>부탁</strong>이지 강제가 아님을 다시 확인하는 기회.
+    <strong><code>EOFError</code> / 입력이 안 먹는다</strong> — 비대화형 실행(파이프·리다이렉트·백그라운드·IDE 콘솔). <strong>대화형 터미널</strong>에서 실행한다.
+    <code>except EOFError: return False</code>가 안전망(fail-closed)이라 <strong>거부로 처리되고 죽지는 않는다</strong>.
+    <strong><code>[max_steps 도달]</code></strong> — <code>update_plan</code>이 1스텝을 먹고 각 단계가 1스텝씩 → <code>MAX_STEPS = 8</code>을 넘길 수 있다.
+    목표를 작게 하거나 <code>MAX_STEPS</code>를 늘린다(M3의 그 가드).
+    <strong>모델이 거부당한 도구를 계속 다시 부른다</strong> — <code>DENIED_MSG</code>에 <strong>다음 행동 지침</strong>
+    (<q>다른 방법을 찾거나 사용자에게 물어보세요</q>)이 들어갔는지 + <code>SYSTEM</code>의 거부 관련 문장 확인.
+    그래도 막히면 <code>diff hermes/agent.py _solution/05-planning-autonomy/hermes/agent.py</code>로 정답과 대조한다.
+  </div>
+
+  <div class="callout note">
+    <strong>트레이드오프를 몸으로:</strong> 이 작은 태스크 하나에 게이트가 <strong>2번</strong> 떴다(<code>run_bash</code> + <code>write_file</code>).
+    <q>겨우 <code>ls</code>까지 물어야 하나?</q> 하는 짜증 — <strong>그게 바로 자율성↔안전 트레이드오프의 실체</strong>다.
+    승인이 너무 많으면 <strong>자율성이 죽고</strong>, 더 나쁘게는 <strong>승인 피로</strong>(습관적으로 <code>y</code>만 눌러 게이트가 유명무실해짐)가 온다.
+    승인이 없으면 <code>run_bash("rm -rf …")</code> 한 번이면 끝이다.
+    실무의 해법은 <strong><q>덜 묻기</q>가 아니라 <q>덜 위험하게 만들기</q></strong>다 —
+    <strong>allowlist</strong>(<code>ls</code>·<code>cat</code>처럼 안전한 명령만 자동 허용), <strong>샌드박스</strong>(격리 환경이면 게이트 없이 자율 최대),
+    <strong>dry-run</strong>, <strong>되돌릴 수 있게 만들기</strong>(작업 전 <code>git commit</code>). M5는 <strong>가장 단순한 다이얼 하나(y/n)</strong>만 구현했다.
+    <em>실험해 보라: <code>DANGEROUS_TOOLS</code>에 <code>read_file</code>까지 넣으면 <strong>모든 스텝에서 물어본다</strong> — 자율성이 사라지는 걸 즉시 체감한다.</em>
+  </div>
+
+  <div class="callout note">
+    <strong>지금 Hermes의 한계 = 다음 모듈의 동기:</strong>
+    ① 계획은 <strong><code>self.plan</code>(파이썬 변수)</strong>에 있을 뿐이고, 모델을 움직이는 건 history에 남은 호출 기록이다 —
+    compaction(M4)이 history를 접으면 <strong>모델 쪽 계획 기억은 흐려질 수 있다</strong>(계획 재주입은 M7 통합에서).
+    ② Hermes는 <strong>가진 도구로만</strong> 자율적이다 — <strong>모르는 지식은 여전히 못 가져온다</strong>.
+    로컬 문서를 <strong>검색</strong>해 답의 근거로 넣는 <strong>RAG는 M6</strong>다.
+    ③ 무슨 일이 있었는지는 아직 <strong><code>print</code>로 흘려볼 뿐</strong> 남지 않는다 — 구조화된 <strong>trace 로깅·eval은 M7</strong>.
+  </div>
+
+  <p><strong>자율 에이전트 요소 완성.</strong> Hermes는 이제 목표 한 줄을 받으면 스스로 계획을 세우고(<code>update_plan</code>),
+    안전한 도구는 자동으로 실행하되 되돌리기 어려운 도구는 실행 직전 사람에게 묻고(<code>DANGEROUS_TOOLS</code> + <code>confirm()</code>),
+    <strong>거부당해도 죽지 않고 적응한다</strong>(<code>is_error</code> <code>tool_result</code>) —
+    다음 <strong>M6 · RAG &amp; Knowledge</strong>에서는 <code>rag.py</code>와 <code>search_docs</code> 도구를 붙여,
+    <strong>모르는 지식을 문서에서 검색해 오는</strong> RAG 에이전트 성격을 흡수한다.</p>
+</section>
+
+        <!-- ========== 이번 모듈 질문 (qa-log 자동 렌더) ========== -->
+        <section class="module-section" id="questions">
+          <h2>이번 모듈 질문</h2>
+          <div id="moduleQa" class="qa-list"><p class="hint">학습 중 궁금한 점을 물어보면 여기에 기록됩니다.</p></div>
+        </section>
+
+        <nav class="module-nav">
+          <a class="prev" href="04-memory-context.html">← 4. Memory &amp; Context</a>
+          <a class="next" href="../index.html">다음: 6. RAG &amp; Knowledge →</a>
+        </nav>
+      </article>
+    </main>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../assets/app.js"></script>
+</body>
+</html>
