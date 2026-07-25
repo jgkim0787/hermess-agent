@@ -1,0 +1,1065 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>6. RAG &amp; Knowledge — Hermes 과정</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body data-page="module" data-slug="06-rag-knowledge">
+  <header class="site-header">
+    <a class="brand" href="../index.html">🛰️ Hermes 과정</a>
+    <button id="navToggle" class="nav-toggle" aria-label="목차 열기">☰</button>
+    <span class="crumb">6. RAG &amp; Knowledge</span>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" id="sidebar"><!-- app.js 가 curriculum.json 으로 채움 --></aside>
+
+    <main class="content">
+      <article class="module">
+        <p class="eyebrow">모듈 6</p>
+        <h1>RAG &amp; Knowledge</h1>
+
+        <!-- ========== 개념 ========== -->
+<section class="module-section" id="concept">
+  <h2>개념</h2>
+  <p>M4에서 Hermes에 대화 메모리를 달며 우리는 못을 하나 박아 뒀다 —
+    <em>"이건 대화를 요약해 이어가는 working memory일 뿐, 임베딩으로 문서를 검색하는 RAG가 아니다 →
+    M6"</em>. M5에서 자율 에이전트를 완성하며 또 한 번 미뤄 뒀다 —
+    <em>"Hermes는 <strong>가진 도구로만</strong> 자율적이다. 모르는 지식을 검색해 오는 건 M6"</em>.
+    <strong>이번 모듈이 그 두 예고를 한꺼번에 회수한다.</strong>
+    (M4가 <code>agent.py</code>의 "여기가 <code>Memory</code> 자리" 주석을, M5가 <code>run_bash</code>의
+    "승인 게이트는 M5" 주석을 회수했던 것과 같은 구조다.)</p>
+
+  <p>지금의 Hermes를 냉정히 보면, 답을 짓는 재료가 <strong>딱 두 가지뿐</strong>이다 —
+    모델이 <strong>학습 때 익힌 지식</strong>과 <strong>지금 대화의 history</strong>. 그 둘 밖에 있는 것은 모른다.
+    이 모듈은 세 섹션이 하나의 소재를 공유한다 — <strong>"Nimbus"</strong>라는 (우리가 방금 지어낸) 사내 배포 도구다.
+    <code>"Nimbus에서 동시에 배포하는 서버 수 기본값이 몇이야?"</code>라고 물으면 지금의 Hermes는
+    <strong>모른다고 하지 않고 그럴듯한 숫자를 지어낸다</strong>. 정답 <strong>4</strong>는 로컬 문서에만 있다.
+    M6가 끝나면 Hermes는 <strong>그 문서를 스스로 찾아 "4"</strong>라고 답한다 — 이 여정이 이번 개념의 전부다.</p>
+
+  <div class="callout note">
+    <strong>표기 규약(★ 세 섹션 공통):</strong> <strong>개념·패턴</strong>은 원어/한글로 —
+    <strong>RAG</strong>, <strong>retrieval</strong>/"검색", <strong>embedding</strong>/"임베딩",
+    <strong>vector search</strong>/"유사도 검색", <strong>chunk</strong>/"청크", <strong>grounding</strong>/"근거",
+    <strong>어휘(lexical) vs 의미(semantic)</strong>, "top-k". <strong>코드·식별자·값</strong>은 코드 표기로 —
+    <code>rag.py</code>, <code>search_docs</code>, <code>DocIndex</code>, <code>chunk_text</code>,
+    <code>tokenize</code>, <code>tfidf_vector</code>, <code>compute_idf</code>, <code>cosine</code>,
+    <code>KB_DIR</code>, <code>TOP_K</code>, <code>DOCS</code>, <code>idf</code>, <code>kb/</code>,
+    <code>tools.py</code>, <code>run_tool</code>, <code>TOOLS</code>, <code>SYSTEM</code>.
+    헷갈리기 쉬운 쌍을 미리 갈라 둔다 — 개념 <strong>"embedding"</strong> vs 함수 <code>tfidf_vector()</code>(우리 embedding의 실체) /
+    개념 <strong>"vector search"</strong> vs 함수 <code>cosine()</code> + top-k 정렬 /
+    개념 <strong>"retrieval"</strong> vs 함수 <code>search()</code> vs 도구 <code>search_docs</code> /
+    개념 <strong>"chunk"</strong> vs 함수 <code>chunk_text()</code>.
+  </div>
+
+  <h3>왜 RAG인가 — 모델은 자기 밖을 모른다</h3>
+  <div class="callout note">
+    <strong>정의 — RAG (Retrieval-Augmented Generation):</strong> 모델이 <strong>모르는 외부 지식을
+    검색해 프롬프트에 넣고(retrieval), 그 근거로 답을 생성(generation)</strong>하는 방식. 모델을 재학습하지 않고
+    지식을 <strong>질의 시점에</strong> 붙인다. 비유하면 <strong>캐시/DB를 조회해 그 결과로 응답을 조립하는
+    서버 핸들러</strong> — 단, 최종 응답을 쓰는 주체가 우리 코드가 아니라 <strong>LLM</strong>이다.
+  </div>
+  <p>왜 Hermes는 Nimbus를 모를까. M1의 두 사실 때문이다. LLM은 <strong>stateless 함수</strong>라 매 호출은
+    우리가 보낸 <code>messages</code>만 보고, 지식은 <strong>학습 cutoff</strong> 시점에 얼어붙어 있다.
+    그래서 학습 코퍼스에 없던 것 — <strong>로컬 파일 내용, 사내 규칙, 어제 정한 값, cutoff 이후의 사실</strong> —
+    은 애초에 알 수가 없다. Nimbus가 딱 그렇다. 우리가 방금 지어낸 도구라 <strong>세상 어떤 모델도 모른다</strong>.</p>
+  <p>더 나쁜 건, 모른다고 안 하고 <strong>그럴듯하게 지어낸다</strong>는 것이다(hallucination). "<code>max_parallel</code>
+    기본값?"에 모델은 "8입니다" 같은 답을 <strong>자신 있게</strong> 내놓는다 — 틀렸는데 틀린 티가 안 난다.
+    해법은 모델의 머리를 바꾸는 것(재학습)이 아니라, <strong>답에 필요한 텍스트를 그때그때 찾아 입력에 끼워 넣는 것</strong>이다.
+    함수가 모든 데이터를 하드코딩하지 않고 런타임에 DB를 조회해 응답을 조립하듯, <strong>RAG는 LLM판 "외부 조회 후 응답"</strong>이다.</p>
+  <p>그 파이프라인은 다섯 조각이다 — 문서를 <strong>chunk</strong>로 쪼개고 → 각 chunk를 <strong>embedding</strong>(벡터)으로
+    만들고 → 질문도 같은 공간의 벡터로 만들어 <strong>vector search</strong>로 가장 가까운 top-k를 찾고(이 검색 행위가
+    <strong>retrieval</strong>) → 그 chunk를 프롬프트에 넣어 → 답을 <strong>생성(generation)</strong>한다. 하나씩 보자.
+    (미리 못 박아 둘 사실 하나 — <strong>chunk화·embedding·검색에는 API 호출이 0이다</strong>. 전부 순수 파이썬이고,
+    Claude는 오직 "검색이 필요하다"는 판단과 "chunk를 근거로 한" 생성에만 쓰인다.)</p>
+
+  <h3>문서를 chunk로 쪼갠다</h3>
+  <div class="callout note">
+    <strong>정의 — chunk(청크):</strong> 검색·임베딩의 <strong>단위</strong>로 문서를 쪼갠 <strong>작은 텍스트 조각</strong>(문단·고정 길이 등).
+    비유하면 큰 로그/문서를 <strong>인덱싱 단위(라인·블록·문단)</strong>로 나누는 것.
+  </div>
+  <p>왜 문서를 통째로 안 넣고 쪼갤까. 이유가 둘이다. ① <strong>정밀도</strong> — 질문과 관련된 <strong>바로 그 부분</strong>만
+    골라 넣어야 정확하다. 문서 전체를 넣으면 노이즈가 섞이고 <strong>토큰 비용</strong>(M1)만 는다. ② <strong>context window</strong>(M4) —
+    큰 문서 여러 개를 애초에 통째로 못 넣는다. 그래서 <strong>문단/문장 단위로 색인하고, 관련된 chunk만 주입</strong>한다.</p>
+  <p>우리 소재로 보면, Nimbus 문서 몇 개를 <code>chunk_text()</code>가 문단(빈 줄) 기준으로 쪼갠다. 짧은 문서라 대개
+    <strong>한 문단 = 한 chunk</strong>다. "<code>max_parallel</code> … 동시에 배포할 서버 수 … 기본값은 4다" 한 문장이
+    하나의 chunk가 되고, "점심 메뉴: 화요일 김치찌개 …" 문장이 또 다른 chunk가 된다.</p>
+  <div class="callout warn">
+    <strong>chunk 크기는 트레이드오프다:</strong> chunk가 <strong>너무 크면</strong> 관련 문장이 무관한 문장에 묻혀 유사도가
+    희석되고 토큰을 낭비한다. <strong>너무 작으면</strong> 맥락이 끊겨(대명사·앞뒤 문장 참조가 사라져) 검색해도 쓸모가 준다.
+    "어디서 끊느냐"가 검색 품질을 좌우하는 <strong>실무 RAG의 핵심 다이얼</strong>이지만, M6는 <strong>문단/고정 길이의 가장 단순한 방식</strong> 하나만 쓴다(겹침·메타데이터 청킹 등은 범위 밖).
+  </div>
+
+  <h3>텍스트를 벡터로 — embedding</h3>
+  <div class="callout note">
+    <strong>정의 — embedding(임베딩):</strong> 텍스트를 <strong>숫자 벡터로 변환</strong>해 "비슷한 텍스트는 벡터가 가깝다"가
+    성립하게 만든 표현. 그러면 텍스트 유사도를 <strong>벡터 거리</strong>로 잴 수 있다. 비유하면 문서를 <strong>term 벡터</strong>로
+    보는 벡터 공간 모델(전통 IR).
+  </div>
+  <p>텍스트끼리 "얼마나 비슷한가"를 컴퓨터가 재려면 숫자로 바꿔야 한다. embedding이 그 다리다 — 텍스트를 벡터로 사상하면
+    <strong>비슷한 텍스트 = 가까운 벡터</strong>가 되어, 벡터 거리로 검색할 수 있다. <strong>★ 우리의 embedding은 순수 파이썬 TF-IDF다.</strong>
+    각 chunk를 <strong>{단어: TF-IDF 가중치}</strong> 스파스 벡터로 만든다. 예컨대 정답 chunk는 개념적으로 이런 모양이 된다 —
+    <code>{"nimbus": 0.31, "max_parallel": 0.74, "동시에": 0.52, "배포": 0.28, "서버": 0.41, "기본값": 0.52, "4": 0.60, ...}</code>.
+    이 dict가 곧 이 chunk의 embedding이다.</p>
+  <pre><code class="language-python">def tokenize(text):
+    return re.findall(r"[가-힣a-zA-Z0-9_]+", text.lower())   # 소문자화 + 단어 추출
+
+def tfidf_vector(tokens, idf):          # ← 이 함수가 '우리의 embedding'이다
+    tf = Counter(tokens)
+    n = len(tokens) or 1
+    return {t: tf[t] / n * idf.get(t, 0.0) for t in tf}
+# idf 는 compute_idf() 가 코퍼스 전체에서 미리 구해 둔 {단어: IDF} 표.
+# (TF-IDF 의 수식 자체는 아는 것으로 두고 넘어간다.)</code></pre>
+  <p>여기서 이 모듈에서 가장 중요한 한 문장을 못 박는다. <strong>TF-IDF도 "진짜" embedding이다.</strong> "텍스트 → 벡터,
+    유사도 = 벡터 거리"라는 embedding의 정의를 그대로 만족한다. 다만 이 벡터의 차원이 <strong>단어 그 자체</strong>라,
+    <strong>어휘(lexical, 단어 겹침)</strong> 기반이지 <strong>의미(semantic)</strong> 기반이 아니다. 이 구분이 왜 중요한지는
+    잠시 뒤 "정직한 고백"에서 정면으로 다룬다.</p>
+
+  <h3>가장 가까운 걸 고른다 — vector search</h3>
+  <div class="callout note">
+    <strong>정의 — vector search(= similarity search, 유사도 검색):</strong> 질문을 <strong>같은 방식으로 벡터화</strong>한 뒤,
+    저장된 chunk 벡터들과 <strong><code>cosine</code> 유사도를 재서 가장 가까운 top-k</strong>를 찾는 것. 비유하면 벡터 공간의
+    <strong>최근접 이웃(k-NN)</strong>, 검색엔진의 스코어링·top-k.
+  </div>
+  <p>질문도 chunk와 <strong>똑같이</strong> <code>tokenize</code> → <code>tfidf_vector</code>로 벡터화한다. 결정적으로
+    <strong>질문도 코퍼스의 같은 <code>idf</code>로</strong> 벡터화한다 — 두 벡터가 <strong>같은 공간</strong>에 있어야 거리를 잴 수 있기 때문이다.
+    그다음 질문 벡터와 모든 chunk 벡터의 <code>cosine</code>을 재서 높은 순으로 <code>TOP_K</code>개를 반환한다.</p>
+  <pre><code class="language-python">def cosine(a, b):
+    dot = sum(a[t] * b.get(t, 0.0) for t in a)
+    na  = math.sqrt(sum(v * v for v in a.values()))
+    nb  = math.sqrt(sum(v * v for v in b.values()))
+    return dot / (na * nb) if na and nb else 0.0   # ← 0-norm 가드: 겹치는 단어가 0이면 0.0</code></pre>
+  <p>대표 질문 <code>"Nimbus에서 동시에 배포하는 서버 수 기본값이 몇이야?"</code>를 벡터화하면 <strong>Nimbus·동시에·배포·서버·수·기본값</strong>이
+    살아 있다. 정답 chunk와는 이 단어들이 여럿 겹쳐 <code>cosine</code>이 높고 → <strong>top-1</strong>. 반면 "점심 메뉴" chunk는
+    겹치는 단어가 하나도 없어 <code>cosine</code>이 <strong>0</strong> → top-k 밖으로 밀린다. (검색이 노이즈를 제대로 버리는지 보려고
+    일부러 무관한 문서를 섞어 뒀다.) <code>cosine</code>을 쓰는 이유는 <strong>문서 길이에 휘둘리지 않는 방향 유사도</strong>라서다.
+    0-norm 가드가 빠지면 질문이 어떤 chunk와도 안 겹칠 때 <code>ZeroDivisionError</code>가 난다 — 흔한 경우다.</p>
+  <div class="callout warn">
+    <strong>비유의 한계(k-NN):</strong> 교과서적 k-NN은 보통 <strong>밀집(dense) 벡터·유클리드 거리</strong>지만, 우리 건
+    <strong>스파스 dict·cosine</strong>이다. 또 우리는 chunk가 몇 개뿐이라 <strong>전수 비교(정확한 top-k)</strong>를 하지만,
+    대규모에선 근사 최근접(ANN)·vector DB를 쓴다 — 그건 M6 범위 밖(포인터)이다.
+  </div>
+
+  <h3>묶으면 retrieval, 도구로 노출하면 RAG 에이전트</h3>
+  <div class="callout note">
+    <strong>정의 — retrieval(검색/인출):</strong> 질의 시점에 <strong>embed(query) → vector search → 관련 chunk 반환</strong>까지를
+    묶은 검색 행위. 비유하면 요청을 받아 <strong>인덱스를 조회해 관련 레코드를 꺼내 오는 조회 계층</strong>.
+  </div>
+  <p>지금까지의 세 조각(embedding·vector search·top-k)을 하나로 묶으면 retrieval이다. 코드에서는 <code>search()</code>가 그 실체다 —
+    query를 벡터화하고, 각 chunk와 <code>cosine</code>을 재고, 내림차순 top-k chunk 텍스트를 돌려준다.</p>
+  <p><strong>★ 여기가 M6의 방점이다: 이 retrieval을 "도구로" 노출한다.</strong> <code>search()</code>를 <code>search_docs</code>라는
+    도구로 감싸(M2의 tool use) <code>TOOLS</code> 스키마에 등록하면 — <strong>모델이 스스로 "지금 검색이 필요하다"고 판단해 부른다.</strong>
+    "매 질문마다 무조건 검색"이 아니라 <strong>필요할 때만</strong>. 이게 "RAG 파이프라인"과 "<strong>RAG 에이전트</strong>"의 차이다:</p>
+  <ul>
+    <li><strong>RAG 파이프라인</strong> — <strong>우리 코드가</strong> 항상 검색해서 프롬프트에 넣는다(실습에서 이렇게 손으로 해 본다).</li>
+    <li><strong>RAG 에이전트</strong> — <strong>모델이</strong> 검색 여부와 검색어를 스스로 정한다(클론에서 <code>search_docs</code>로 이렇게 만든다).</li>
+  </ul>
+  <pre><code class="language-python">def search_docs(query: str) -&gt; str:
+    hits = rag.search(query)                        # list[str] — top-k chunk 텍스트
+    return "\n\n---\n\n".join(hits) or "(관련 문서 없음)"
+    # 반환은 반드시 '문자열', 빈 문자열도 금지 — tool_result content 규칙(M2/M3).
+    # rag.search 가 준 list 를 그대로 반환하면 'tool_result content must be a string' 400
+    # (M3 실습에서 겪은 그 400이다) → 그래서 chunk 들을 join 한다.</code></pre>
+  <p>이제 <strong>RAG = Retrieval-Augmented Generation</strong>이 완성된다 — 찾아온 chunk를 프롬프트에 <strong>주입(augment)</strong>하고,
+    모델이 <strong>그 근거로 답을 생성(generation)</strong>한다. 여기에 한 겹을 더한다: <strong>grounding(근거 두기)</strong> —
+    <code>SYSTEM</code>에 <em>"검색해 온 문서에 근거해 답하고, 문서에 없으면 모른다고 하라"</em>는 정책을 넣어 hallucination을 줄이는 것이다.
+    Nimbus 질문엔 검색한 chunk(정답 4)를 근거로 답하고, <code>kb/</code>에 없는 것(예: "Nimbus 로그는 어디 쌓여?")엔 지어내지 않고
+    <strong>"문서에 없다"</strong>고 답하게 된다. 전체 흐름을 한 장으로 보면:</p>
+  <pre><code class="language-text">you&gt; Nimbus에서 동시에 배포하는 서버 수 기본값이 몇이야?
+      │
+      │   모델: "이건 학습으로 알 수 없다" → search_docs 호출을 스스로 결정   (M3 루프)
+      ▼
+  [embed]    질문 → tfidf_vector(tokenize(질문), idf)        질문도 '같은 idf'로 벡터화
+      ▼
+  [search]   질문 벡터 vs 각 chunk 벡터 → cosine → 내림차순    (vector search)
+      ▼
+  top-3   1. "…max_parallel…동시 배포 서버 수…기본값 4"   점수 높음   ← 정답 chunk
+          2. "…nimbus ship / --stage…"                   점수 낮음
+          3. "…nimbus.toml…"                             점수 낮음
+          ✗ "화요일 김치찌개…" (점심 메뉴)   cosine 0 → top-k 밖
+      ▼
+  [augment]  top-3 chunk를 tool_result 문자열로 회신 → 프롬프트에 주입   (retrieval 끝)
+      ▼
+  [generate] 모델이 그 chunk를 근거로 답: "기본값은 4입니다"    (grounding)</code></pre>
+  <div class="callout warn">
+    <strong>비유의 한계(조회 계층):</strong> 보통 조회 계층은 <strong>호출자(코드)가</strong> "언제 무엇을 조회할지"를 정한다.
+    도구화한 retrieval은 그 결정을 <strong>모델에게 넘긴다</strong> — 그래서 <code>SYSTEM</code>의 검색 정책은 <strong>강제가 아니라 부탁</strong>이다.
+    모델이 검색을 건너뛰고 지어낼 수도 있다(그때는 M5의 교훈대로 — 강제가 필요하면 코드로 막지만, 검색은 위험하지 않아 강제하지 않는다).
+  </div>
+
+  <h3>★ 정직한 고백 — 왜 embedding이 TF-IDF인가</h3>
+  <p>여기서 이 모듈에서 가장 정직해야 할 부분을 짚는다. 우리 embedding은 신경망이 아니라 <strong>순수 파이썬 TF-IDF</strong>다. 왜?</p>
+  <div class="callout why">
+    <strong>왜 신경망 embedding이 아니라 TF-IDF인가:</strong> <strong>Anthropic API에는 embeddings 엔드포인트가 없다</strong> —
+    Claude는 텍스트를 벡터로 만들어 주지 않는다. 따라서 <code>client.embeddings.create(...)</code> 같은 코드는
+    <strong>존재하지 않는다</strong>(있는 줄 알고 쓰면 에러다). 그래서 M6는 embedding을 <strong>표준 라이브러리(<code>math</code>·<code>re</code>·<code>collections</code>)만으로 직접</strong> 만든다 —
+    외부 vector DB·임베딩 API·<code>numpy</code>/<code>sklearn</code> 없이. <strong>이건 버그가 아니라 설계다.</strong>
+    그리고 이 결정이 오히려 더 깊은 학습을 준다 — 아래 세 가지 때문이다.
+  </div>
+  <ul>
+    <li><strong>TF-IDF도 진짜 embedding이다.</strong> "텍스트 → 벡터, 유사도 = 벡터 거리"라는 정의를 그대로 만족한다.
+      다만 벡터가 <strong>어휘(단어 겹침)</strong> 기반이지 의미 기반이 아닐 뿐.</li>
+    <li><strong>파이프라인이 프로덕션과 100% 동일하다.</strong> <code>chunk → embed → cosine top-k → 프롬프트 주입 → 생성</code>,
+      그리고 <code>search_docs</code> 도구화·agent loop 연결 — <strong>전부 신경망 RAG와 똑같다.</strong></li>
+    <li><strong>바뀌는 seam은 딱 하나: <code>embed(text) -&gt; vector</code>.</strong> 프로덕션은 이 함수 하나(우리의 <code>tfidf_vector</code>)를
+      신경망 임베딩 모델로 갈아끼울 뿐, <strong>나머지 코드는 그대로</strong>다.</li>
+  </ul>
+  <p>그래서 세 섹션이 <strong>똑같이</strong> 못 박는 한 문장은 이것이다 — <em>"TF-IDF는 프로덕션 신경망 embedding의 자리에 끼운
+    순수 파이썬 대체물이고, 교체 지점은 <code>embed</code> 한 곳이다."</em> 임베딩을 <strong>못 배우는</strong> 게 아니라,
+    임베딩을 <strong>교체 가능한 한 함수로 이해</strong>하는 것이 오히려 더 본질이다.</p>
+  <div class="callout warn">
+    <strong>어휘(lexical) vs 의미(semantic) — TF-IDF는 동의어를 못 잡는다:</strong> TF-IDF 벡터의 차원은 <strong>단어 그 자체</strong>다.
+    그래서 "<strong>동시에</strong>"와 "<strong>한꺼번에</strong>"는 <strong>서로 다른 차원</strong>이고, 겹치는 단어가 없으면 <code>cosine</code>이 <strong>0</strong>이 된다.
+    대표 질문을 동의어로 바꿔 <em>"Nimbus에서 <strong>한꺼번에 올리는 머신</strong> 개수 한도?"</em>(동시에→한꺼번에, 배포→올리는, 서버→머신)라고 물으면
+    TF-IDF는 <code>max_parallel</code> chunk를 <strong>놓친다</strong> — 사람에겐 같은 질문인데도. <strong>이건 버그가 아니라 어휘 유사도의 본질적 한계다.</strong>
+    신경망 embedding은 "동시에"와 "한꺼번에"를 <strong>가까운 벡터</strong>로 두어(의미) 이걸 잡는다 — <strong>그래서 프로덕션은 신경망 embedding을 쓴다.</strong>
+    업그레이드 경로는 한 줄이다: <code>embed()</code>만 신경망 임베딩 모델(서드파티 임베딩 API 또는 로컬 <code>sentence-transformers</code> 같은)로 교체, <strong>나머지는 그대로.</strong>
+    (실습에서 이 "놓침"을 직접 재현해 본다.)
+  </div>
+
+  <h3>★ memory(M4)와 RAG(M6)는 다르다</h3>
+  <p>M4에서 "이건 임베딩/검색이 아니다 → M6"라고 미뤄 둔 구분을 여기서 닫는다. 둘 다 "모델에게 뭔가를 더 준다"는 점이 같아
+    헷갈리기 쉽지만, <strong>방향이 반대</strong>다.</p>
+  <div class="callout warn">
+    <strong>memory(M4) ≠ RAG(M6):</strong> <strong>memory</strong>는 "<strong>방금까지 무슨 대화를 했나</strong>"를 이어가는 working memory다 —
+    history를 쌓고, 길어지면 요약·압축(compaction)한다. 핵심은 <strong>저장·요약</strong>이고, 내용은 <strong>우리가 나눈 대화</strong>다.
+    <strong>RAG</strong>는 "<strong>내가 모르는 외부 지식</strong>"을 <strong>검색해 끌어오는</strong> 것이다 — embedding·유사도로 문서를 찾아 주입한다.
+    핵심은 <strong>검색·주입</strong>이고, 내용은 <strong>대화 밖의 문서</strong>다. 둘은 <strong>대체재가 아니라 보완재</strong>다 —
+    memory는 대화를 <strong>잇고</strong>, RAG는 사실을 <strong>끌어온다</strong>.
+  </div>
+  <p>그리고 둘은 실제로 만난다 — 검색해 온 chunk는 <code>tool_result</code>로 <strong>history에 쌓여</strong> <strong>context window</strong>를 먹고,
+    대화가 길어지면 M4의 <strong>compaction이 그 오래된 chunk를 접는다</strong>. 즉 <strong>RAG 결과는 영속 지식이 아니라 그때그때의 소모성 컨텍스트</strong>다.
+    (kb 문서 자체는 파일로 남지만, 한 번 검색해 넣은 chunk는 대화가 흘러가면 사라진다 — 필요하면 또 검색한다.)</p>
+
+  <h3>새 능력 = 새 도구 — 루프는 그대로</h3>
+  <p>이제 이 모듈의 클라이맥스다. <strong>RAG라는 큰 능력을 붙였는데 — <code>agent.py</code>는 한 줄도 안 바뀐다.</strong>
+    왜냐하면 <code>search_docs</code>는 그냥 <strong>하나의 도구</strong>이기 때문이다. 모델이 부르면 M2의 <code>tool_use</code>↔<code>tool_result</code> 왕복과
+    M3의 <code>while</code> 루프가 <strong>이미</strong> 다 처리한다. 위험하지 않으니(읽기 전용) M5의 승인 게이트도 그냥 통과하고,
+    <code>update_plan</code>이 아니니 <code>else: run_tool</code> 경로로 흐른다 — <strong><code>read_file</code>과 똑같은 길</strong>이다.</p>
+  <pre><code class="language-python"># (M5 agent.py — 한 줄도 안 바뀐다) search_docs 호출은 이 '기존' 경로로 흐른다:
+if block.name in DANGEROUS_TOOLS and not confirm(...):   # search_docs ∉ DANGEROUS_TOOLS → 게이트 건너뜀
+    ...
+if block.name == "update_plan":                          # search_docs ≠ update_plan → else 로
+    result = self._update_plan(block.input["steps"])
+else:
+    result = run_tool(block.name, block.input)           # ← search_docs 가 여기 (read_file 과 같은 길)</code></pre>
+  <p>그럼 이 새 도구를 <strong>어디에 둘지, 실행 전에 물을지</strong>는 어떻게 정했나? <strong>M5의 두 질문이 그대로 답을 준다.</strong>
+    ① <strong>바깥이냐 자신이냐</strong> → <code>search_docs</code>는 <strong>바깥 지식(<code>kb/</code> 문서)을 조회</strong>한다(<code>read_file</code>과 같은 부류) →
+    <code>tools.py</code> + <code>run_tool</code>에 둔다(<code>self.plan</code>을 건드리던 <code>update_plan</code>과는 정반대). ② <strong>되돌릴 수 있느냐</strong> →
+    <strong>읽기 전용이라 되돌릴 게 없다</strong> → <code>DANGEROUS_TOOLS</code>에 넣지 않는다(승인 게이트 없음). M5에서 세운 기준이 새 도구에 그대로 적용된다.</p>
+  <div class="callout why">
+    <strong>왜 큰 능력을 붙였는데 루프는 그대로인가:</strong> M3에서 agent loop를 제대로 만든 뒤로, <strong>새 능력을 붙이는 방법은
+    "루프를 고치는 것"이 아니라 "도구를 더하는 것"</strong>이었다. M2 <code>read_file</code>, M3 <code>write_file</code>/<code>run_bash</code>,
+    M5 <code>update_plan</code>, 그리고 <strong>M6 <code>search_docs</code></strong> — <strong>루프는 고정, 도구만 쌓였다.</strong>
+    비유하면 잘 설계된 <strong>플러그인 아키텍처</strong> — 코어(loop)는 그대로, 기능은 플러그인(도구)으로 얹는다.
+    이것이 M7(통합)의 전제다: 통합이란 "새 코드를 합치는 것"이 아니라 <strong>"이미 다 되는 루프에 도구들을 모아 두는 것"</strong>이다.
+  </div>
+  <div class="callout warn">
+    <strong>비유의 한계(플러그인) + 한 가지 미묘함:</strong> 플러그인은 코어가 <strong>명시적으로 등록·호출</strong>하지만, 도구는
+    <strong>모델이 확률적으로 고른다</strong> — 그래서 "검색해라"가 강제가 아니라 부탁인 것이다. 그리고 미묘한 점 하나 —
+    ReAct(M3)의 눈으로 보면 <code>search_docs</code>는 <strong>"관찰(observation)을 스스로 만들어 오는" 도구</strong>다:
+    모델이 <strong>추론</strong>("이건 모른다") → <strong>행동</strong>(<code>search_docs</code> 호출) → <strong>관찰</strong>(chunk를 <code>tool_result</code>로 받음) →
+    그 근거로 <strong>생성</strong>. <strong>RAG가 agent loop에 이토록 자연스럽게 맞아 드는 이유</strong>가 바로 이것이다.
+  </div>
+
+  <h3>한눈 정리</h3>
+  <ul>
+    <li><strong>왜 RAG인가.</strong> 모델은 <strong>stateless + 학습 cutoff</strong>(M1)라 <strong>자기 밖의 지식(로컬·사설·최신)을 모르고, 모르면 지어낸다</strong>(hallucination).
+      해법은 재학습이 아니라 <strong>관련 텍스트를 찾아 프롬프트에 넣어 주기</strong> — LLM판 "외부 조회 후 응답".</li>
+    <li><strong>파이프라인은 다섯 조각.</strong> 문서를 <strong>chunk</strong>로 쪼개(<code>chunk_text</code>) → 각 chunk를 <strong>embedding</strong>(<code>tfidf_vector</code>)으로 →
+      질문도 <strong>같은 <code>idf</code></strong>로 벡터화해 <strong>vector search</strong>(<code>cosine</code> top-k)로 검색 → 이 검색 행위가 <strong>retrieval</strong>(<code>search</code>) →
+      chunk를 주입해 <strong>생성</strong>. chunk화·embedding·검색엔 <strong>API 호출이 0</strong>이다.</li>
+    <li><strong>★ TF-IDF도 진짜 embedding이다 — 다만 어휘(lexical)지 의미(semantic)가 아니다.</strong> Anthropic엔 임베딩 API가 없어
+      <strong>순수 파이썬 TF-IDF를 직접 만든다(설계, 버그 아님)</strong>. 파이프라인은 프로덕션과 동일, <strong>바뀌는 seam은 <code>embed</code> 한 곳뿐</strong>.
+      동의어를 못 잡는 게 어휘 유사도의 한계이자 <strong>프로덕션이 신경망 embedding을 쓰는 이유</strong>다.</li>
+    <li><strong>retrieval을 도구로 노출하면 "RAG 에이전트"가 된다.</strong> <code>search_docs</code>로 감싸면 모델이 <strong>스스로 검색 시점을 정한다</strong>("항상"이 아니라 "필요하면").
+      <code>grounding</code>(<code>SYSTEM</code> 정책)으로 <strong>문서에 있으면 근거로 답하고, 없으면 "모른다"</strong>고 하게 한다 — 단 이건 <strong>부탁</strong>이다.</li>
+    <li><strong>memory(M4) ≠ RAG(M6).</strong> memory는 대화를 <strong>잇고</strong>(저장·요약), RAG는 외부 사실을 <strong>끌어온다</strong>(검색·주입). <strong>보완재</strong>다.
+      검색해 온 chunk는 <code>tool_result</code>로 history에 쌓여 길어지면 M4 compaction이 접는 <strong>소모성 컨텍스트</strong>다.</li>
+    <li><strong>★ 새 능력 = 새 도구 — <code>agent.py</code>는 무변경.</strong> <code>search_docs</code>는 M3 루프·M5 게이트 분기를 <strong>그대로</strong> 통과한다(<code>read_file</code>과 같은 길).
+      배치·게이트는 M5의 두 질문(바깥이냐 자신이냐 / 되돌릴 수 있느냐)이 답한다. <strong>범위 = RAG 파이프라인 + 도구화까지</strong> —
+      신경망 embedding·vector DB·재순위는 <strong>포인터</strong>, 세 flavor 통합·<strong>eval</strong>·<strong>trace 로깅은 M7</strong>.</li>
+  </ul>
+</section>
+
+        <!-- ========== 직접 사용해보기 ========== -->
+<section class="module-section" id="practice">
+  <h2>직접 사용해보기</h2>
+  <p class="hint">아래 코드를 직접 타이핑해 실행해 보세요. 전제: <code>clone-project</code>를 <code>uv</code>로 셋업(Python 3.12).
+    <strong><code>step1</code>·<code>step3</code>은 API를 부르지 않으니 키가 없어도 실행</strong>되고, <code>step2</code>만 <code>ANTHROPIC_API_KEY</code>가 필요합니다.
+    실습 파일은 <code>clone-project/practice/06-rag-knowledge/stepN.py</code>에 두고
+    <code>cd clone-project &amp;&amp; uv run python practice/06-rag-knowledge/stepN.py</code>로 실행합니다.
+    <strong>새 패키지는 하나도 설치하지 않습니다 — 표준 라이브러리(<code>math</code>·<code>re</code>·<code>collections</code>)만</strong>
+    씁니다(<code>practice/</code>는 <code>.gitignore</code>된 개인 실험 공간입니다).</p>
+
+  <p>개념에서 본 RAG 파이프라인 — 문서를 <strong>chunk</strong>로 쪼개고 → <strong>embedding</strong>(벡터)으로 만들고 →
+    질문도 같은 공간의 벡터로 만들어 <strong>cosine top-k</strong>로 찾고(<strong>retrieval</strong>) → 그 chunk를 근거로 <strong>생성</strong> —
+    을 이번엔 <strong>손으로</strong> 돌려 본다. 도구도 agent loop도 없다. 순수 파이썬 함수 <strong>다섯 개</strong>(<code>tokenize</code> ·
+    <code>chunk_text</code> · <code>compute_idf</code> · <code>tfidf_vector</code> · <code>cosine</code>)로 "검색"을 직접 만들고(step1),
+    딱 한 번 Claude를 불러 <strong>"검색해 답하기"가 "지어내기"를 어떻게 이기는지</strong> 보고(step2),
+    마지막으로 <strong>같은 뜻을 다른 단어로 물으면 왜 놓치는지</strong>(어휘 vs 의미)를 눈으로 재현한다(step3).</p>
+
+  <div class="callout note">
+    <strong>이 실습은 "수동 RAG"다 — 검색을 <em>우리가</em> 한다.</strong> 여기선 <strong>우리 코드가 항상 검색해서</strong> 그 결과를 프롬프트에 넣는다(RAG 파이프라인).
+    클론에선 이 검색이 <code>search_docs</code> <strong>도구</strong>로 노출돼 <strong>모델이 스스로 "지금 검색이 필요하다"고 판단해 부른다</strong>(RAG 에이전트).
+    <strong>골격은 완전히 같다</strong> — 실습에서 손으로 돌린 다섯 함수가 <strong>이름·수식 그대로</strong> 클론 <code>rag.py</code>에 들어간다.
+    (M2의 가짜 <code>get_weather</code>, M5의 가짜 <code>delete_file</code>과 같은 전통: <strong>실습은 메커니즘만 빠르게, 부작용 0</strong>. 진짜 <code>kb/</code> 파일·도구화는 <strong>클론</strong>에서.)
+  </div>
+
+  <div class="callout warn">
+    <strong>이 실습엔 memory(M4)가 없다 — 지금 만드는 건 RAG이지 memory가 아니다.</strong>
+    여기서 만드는 <strong>색인(index)</strong>은 "방금까지 무슨 대화를 했나"를 잇는 working memory(M4)가 <strong>아니다</strong>.
+    <strong>memory</strong>는 대화를 <strong>잇고</strong>(저장·요약), <strong>RAG</strong>는 대화 <em>밖</em>의 외부 문서를 <strong>검색해 끌어온다</strong>(임베딩·유사도).
+    이 실습은 오직 <strong>후자</strong>다 — 대화 history를 전혀 건드리지 않고, 문서를 벡터로 만들어 질문에 가장 가까운 조각을 고른다.
+  </div>
+
+  <h3>0) 준비</h3>
+  <pre><code class="language-bash">cd clone-project
+uv sync                                    # Python 3.12.* + 의존성 (.venv 생성, 최초 1회. 이미 했으면 생략)
+mkdir -p practice/06-rag-knowledge         # 이번 모듈 실습 폴더
+export ANTHROPIC_API_KEY="sk-ant-..."      # step2에서만 필요(step1·step3은 키 없이 실행)</code></pre>
+  <div class="callout note">
+    M1~M5와 같은 환경이다(uv, Python 3.12). 키는 <a href="https://console.anthropic.com/">console.anthropic.com</a>에서 발급한다.
+    <strong>이번 실습의 검색(chunk·embedding·cosine)은 전부 순수 파이썬이라 API 호출이 0이다</strong> — 그래서 <code>step1</code>·<code>step3</code>은 키가 없어도 돈다.
+    Claude를 부르는 건 <code>step2</code> 하나뿐이고, 거기서도 <strong>딱 2번</strong>(검색 없이 1번 + 검색해서 1번) 부른다.
+    <code>max_tokens=200</code>으로 짧게 잡아 비용을 억제한다.
+  </div>
+
+  <h3>1) 문서를 벡터로 만들어 검색하기 <span style="font-weight:normal">(API 없이 — 부품 먼저)</span></h3>
+  <p>먼저 <strong>검색 엔진 자체</strong>를 만든다. 하드코딩한 <code>DOCS</code>(가짜 사내 도구 "Nimbus" 문서 4개 + 노이즈 1개)를
+    <code>chunk_text</code>로 쪼개 → <code>compute_idf</code>/<code>tfidf_vector</code>로 <strong>각 chunk를 벡터(embedding)로 색인</strong>하고 →
+    대표 질문도 <strong>같은 <code>idf</code>로</strong> 벡터화해 <code>cosine</code>으로 <strong>전 문서에 점수를 매긴다</strong>.
+    <strong>API를 부르지 않으니 키 없이 돌아간다</strong> — 검색이 정답 문단을 top-1으로 집어내고, 무관한 점심 메뉴는 0점으로 밀어내는지 눈으로 확인한다.</p>
+  <pre><code class="language-python"># step1.py — M6 실습의 핵심 부품: 순수 파이썬 TF-IDF 색인 + cosine top-k 검색
+#            API 호출이 없다 → 키가 없어도 실행된다. numpy·vector DB 없이 표준 라이브러리만.
+import math
+import re
+from collections import Counter
+
+TOP_K = 3   # 검색이 돌려줄 상위 chunk 수
+
+# ── 검색 대상 문서(하드코딩). "Nimbus"는 우리가 방금 지어낸 가짜 사내 배포 도구라
+#    세상 어떤 모델도 모른다 → 그래서 RAG의 효과가 분명히 드러난다.
+#    마지막 하나는 일부러 넣은 '노이즈'(점심 메뉴) — 검색이 무관한 문서를 배제하는지 본다.
+DOCS = [
+    "Nimbus는 우리 팀 내부에서 쓰는 배포 도구다. 설정 파일은 프로젝트 루트의 nimbus.toml 이다.",
+    "프로덕션 배포는 nimbus ship 명령으로 한다. 스테이징에만 배포하려면 nimbus ship --stage 를 쓴다.",
+    "배포를 되돌리려면 nimbus rollback &lt;버전&gt; 을 실행한다. 배포된 버전 목록은 nimbus versions 로 확인한다.",
+    "nimbus.toml 의 max_parallel 키는 한 번에 동시에 배포하는 서버 수를 정한다. max_parallel 기본값은 4다.",
+    "이번 주 팀 점심 메뉴: 화요일은 김치찌개, 금요일은 파스타. 다음 주 회식 장소는 미정이다.",
+]
+
+
+def tokenize(text):
+    """소문자화 + 한글/영문/숫자 단어만 추출. query와 chunk를 '같은 규칙'으로 쪼개야
+    같은 벡터 공간에 놓인다 → 그래서 이 함수를 양쪽에서 공용한다."""
+    return re.findall(r"[가-힣a-zA-Z0-9_]+", text.lower())
+
+
+def chunk_text(text, max_chars=500):
+    """문서를 검색·임베딩의 단위 chunk로 쪼갠다. 문단(빈 줄) 기준으로 나누고, 너무 길면 max_chars로 자른다.
+    (여기 DOCS는 짧아 대개 1문서 = 1chunk. 클론에선 같은 함수로 .md 파일을 쪼갠다.)"""
+    chunks = []
+    for para in re.split(r"\n\s*\n", text):
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) &lt;= max_chars:
+            chunks.append(para)
+        else:                                    # 너무 길면 고정 길이로 더 자른다
+            for i in range(0, len(para), max_chars):
+                chunks.append(para[i:i + max_chars])
+    return chunks
+
+
+def compute_idf(chunk_token_lists):
+    """코퍼스 전체의 IDF. ★ smoothed 공식: log((N+1)/(df+1)) + 1.
+    평범한 log(N/df)는 '모든 chunk에 있는 단어'의 idf를 0으로 만들어(→ 벡터가 죽는다),
+    문서 수가 적은 작은 코퍼스에서 특히 위험하다. +1 smoothing이 그걸 막는다."""
+    N = len(chunk_token_lists)
+    df = Counter()
+    for tokens in chunk_token_lists:
+        for t in set(tokens):                    # 한 chunk에서 같은 단어는 한 번만(document frequency)
+            df[t] += 1
+    return {t: math.log((N + 1) / (df_t + 1)) + 1 for t, df_t in df.items()}
+
+
+def tfidf_vector(tokens, idf):
+    """★ 우리의 embedding — 토큰을 {단어: TF-IDF 가중치} 스파스 벡터(dict)로 만든다.
+    query도 반드시 '코퍼스에서 만든 같은 idf'로 벡터화해야 같은 공간에 놓인다."""
+    tf = Counter(tokens)
+    n = len(tokens) or 1                          # 빈 입력의 0으로 나누기 방지
+    return {t: tf[t] / n * idf.get(t, 0.0) for t in tf}
+
+
+def cosine(a, b):
+    """두 스파스 벡터의 코사인 유사도. 방향(각도)만 보므로 문서 길이에 안 휘둘린다.
+    ★ 0-norm 가드 필수 — 겹치는 단어가 하나도 없으면 norm=0 → ZeroDivisionError."""
+    dot = sum(w * b.get(t, 0.0) for t, w in a.items())
+    na = math.sqrt(sum(w * w for w in a.values()))
+    nb = math.sqrt(sum(w * w for w in b.values()))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+# ── 색인(index) 만들기: DOCS → chunk → idf → 각 chunk의 embedding 벡터 ──
+chunks = []
+for doc in DOCS:
+    chunks.extend(chunk_text(doc))
+token_lists = [tokenize(c) for c in chunks]
+idf = compute_idf(token_lists)                    # 코퍼스 전체에서 idf를 '한 번만' 구한다
+vectors = [tfidf_vector(toks, idf) for toks in token_lists]
+
+
+def search(query, k=TOP_K):
+    """retrieval의 실체 — query를 '같은 idf'로 벡터화해 각 chunk와 cosine을 재고,
+    높은 순으로 (점수, chunk) 상위 k개를 돌려준다."""
+    qv = tfidf_vector(tokenize(query), idf)
+    scored = [(cosine(qv, v), c) for v, c in zip(vectors, chunks)]
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return scored[:k]
+
+
+# ── 데모: 대표 질문으로 검색 (★ step2·step3에서는 이 아래만 바꾼다) ────────────
+question = "Nimbus에서 동시에 배포하는 서버 수 기본값이 몇이야?"
+print(f"문서 {len(DOCS)}개 → chunk {len(chunks)}개, 어휘(고유 단어) {len(idf)}개")
+print(f"질문: {question}\n")
+for rank, (score, chunk) in enumerate(search(question, k=len(chunks)), 1):   # k=전체 → 전 문서 점수를 본다
+    cut = " ← top-k 안" if rank &lt;= TOP_K else " ← top-k 밖"
+    print(f"[{rank}] score={score:.3f}  {chunk[:34]}...{cut}")</code></pre>
+  <pre><code class="language-bash">uv run python practice/06-rag-knowledge/step1.py</code></pre>
+  <pre class="output">문서 5개 → chunk 5개, 어휘(고유 단어) 59개
+질문: Nimbus에서 동시에 배포하는 서버 수 기본값이 몇이야?
+
+[1] score=0.433  nimbus.toml 의 max_parallel 키는 한 번에... ← top-k 안
+[2] score=0.000  Nimbus는 우리 팀 내부에서 쓰는 배포 도구다. 설정 파일... ← top-k 안
+[3] score=0.000  프로덕션 배포는 nimbus ship 명령으로 한다. 스테이징... ← top-k 안
+[4] score=0.000  배포를 되돌리려면 nimbus rollback &lt;버전&gt; 을 실... ← top-k 밖
+[5] score=0.000  이번 주 팀 점심 메뉴: 화요일은 김치찌개, 금요일은 파스타.... ← top-k 밖</pre>
+  <div class="callout why">
+    <strong>여기서 볼 것 두 가지.</strong>
+    <ul>
+      <li><strong>정답 chunk가 top-1이다(score 0.433).</strong> "<code>max_parallel</code> … 동시에 배포하는 서버 수 … 기본값은 4다" chunk가
+        질문과 <strong>겹치는 단어</strong>(동시에·배포하는·서버)를 여럿 가져 <code>cosine</code>이 살아남았다. <strong>정답을 정확히 집어냈다.</strong></li>
+      <li><strong>점심 메뉴 노이즈는 0.000으로 꼴찌다.</strong> 질문과 겹치는 단어가 하나도 없어 <code>cosine</code>이 <strong>0</strong> — 검색이 무관한 문서를 제대로 <strong>배제</strong>한다.
+        (0-norm 가드가 없었다면 이 0점 계산에서 <code>ZeroDivisionError</code>가 났다.)</li>
+    </ul>
+  </div>
+  <div class="callout note">
+    <strong>다른 Nimbus 문서도 0점인 게 이상한가? — 아니다, 이게 "어휘(lexical)" 검색이다.</strong>
+    <code>tokenize</code>는 한글 조사를 단어에 붙여 자른다 — 그래서 "<strong>배포하는</strong>"(질문)과 "<strong>배포는</strong>"·"<strong>배포를</strong>"(다른 문서)는
+    <strong>서로 다른 토큰</strong>이라 안 겹친다. 질문의 "<code>nimbus에서</code>"도 문서의 "<code>nimbus</code>"와 다른 토큰이다.
+    그래서 <strong>정확히 같은 단어를 쓴 정답 chunk만</strong> 점수가 살아남았다. <strong>이 "단어가 정확히 겹쳐야 한다"는 성질이 곧 어휘 유사도의 힘이자 한계</strong>이고,
+    step3에서 이 한계를 정면으로 재현한다. (지금은 정답이 그 단어들을 그대로 담고 있어 검색이 <strong>성공</strong>한다.)
+  </div>
+
+  <h3>2) 검색해서 답하기 vs 그냥 답하기 <span style="font-weight:normal">(딱 2번 API 호출)</span></h3>
+  <p>이제 <strong>RAG의 본질</strong>을 본다 — <strong>같은 질문을 두 번</strong> 던진다. <strong>(a)</strong> 검색 없이 그냥 물으면 모델은 Nimbus를 몰라
+    <strong>그럴듯한 숫자를 지어낸다</strong>(hallucination). <strong>(b)</strong> step1의 검색으로 찾은 chunk를 <strong>프롬프트에 넣어(augment)</strong> 물으면
+    그 근거로 <strong>정확히 "4"</strong>라고 답한다. <strong>이게 retrieval → augment → generate</strong>다(도구·루프 없이 본질만).
+    <code>step1.py</code>를 복사해 <strong>두 곳만</strong> 바꾼다.</p>
+  <pre><code class="language-bash">cp practice/06-rag-knowledge/step1.py practice/06-rag-knowledge/step2.py</code></pre>
+  <p><strong>① 파일 맨 위 <code>import</code> 블록에 한 줄</strong>을 추가한다:</p>
+  <pre><code class="language-python">import anthropic   # ← step2에서 추가 (import math/re/Counter 아래)</code></pre>
+  <p><strong>② 파일 맨 아래 <code># ── 데모 …</code> 주석 이하를 통째로 지우고</strong> 아래로 교체한다
+    (위쪽 <code>DOCS</code>·다섯 함수·색인·<code>search</code>는 <strong>그대로 둔다</strong>):</p>
+  <pre><code class="language-python"># ── 데모 블록을 지우고 아래로 교체: 수동 RAG — 검색 없이(a) vs 검색해서(b) ──
+client = anthropic.Anthropic()          # ANTHROPIC_API_KEY 환경변수 자동 사용
+MODEL = "claude-sonnet-4-6"
+question = "Nimbus에서 동시에 배포하는 서버 수 기본값이 몇이야?"
+
+# (a) 검색 없이 그냥 묻는다 — 모델은 Nimbus를 모른다 → 지어내거나 모른다고 한다
+resp_a = client.messages.create(
+    model=MODEL, max_tokens=200,
+    messages=[{"role": "user", "content": question}],
+)
+print("== (a) 검색 없이 그냥 물었을 때 ==")
+print(next(b.text for b in resp_a.content if b.type == "text"))
+
+# (b) 검색해서 근거를 넣고 묻는다 — step1의 search로 찾은 top-k chunk를 프롬프트에 주입(augment)
+hits = [c for score, c in search(question) if score &gt; 0]   # 점수 0(전혀 안 겹침)은 버린다
+context = "\n\n---\n\n".join(hits) or "(관련 문서 없음)"      # 여러 chunk를 '하나의 문자열'로
+prompt = (
+    "아래 [문서]에 근거해서만 [질문]에 답해. 문서에 없는 내용은 추측하지 말고 모른다고 해.\n\n"
+    f"[문서]\n{context}\n\n[질문] {question}"
+)
+resp_b = client.messages.create(
+    model=MODEL, max_tokens=200,
+    messages=[{"role": "user", "content": prompt}],
+)
+print("\n== (b) 검색한 chunk를 근거로 넣었을 때 ==")
+print(next(b.text for b in resp_b.content if b.type == "text"))</code></pre>
+  <pre><code class="language-bash">uv run python practice/06-rag-knowledge/step2.py</code></pre>
+  <pre class="output">== (a) 검색 없이 그냥 물었을 때 ==
+Nimbus에서 동시에 배포하는 서버 수의 기본값은 **1**입니다.
+
+Nimbus는 기본적으로 순차적(rolling) 방식으로 배포하며, 한 번에 하나의 서버에 배포하는 것이 기본 동작입니다.
+(... 혹시 Apache Storm의 Nimbus 등 다른 도구를 말하는지 되묻기도 한다 ...)
+
+== (b) 검색한 chunk를 근거로 넣었을 때 ==
+[문서]에 따르면, Nimbus에서 동시에 배포하는 서버 수의 기본값은 **4**입니다.
+이는 nimbus.toml의 max_parallel 키를 통해 설정할 수 있습니다.</pre>
+  <div class="callout why">
+    <strong>(a)와 (b)를 나란히 보라 — 이게 RAG의 전부다.</strong>
+    <strong>(a) 검색 없이</strong>: 모델은 Nimbus를 <strong>학습으로 알 수 없어</strong> 그럴듯한 숫자(<code>1</code>)를 <strong>자신 있게 지어냈다</strong> — 틀렸는데 틀린 티가 안 난다(hallucination).
+    심지어 엉뚱한 Apache Storm의 Nimbus를 떠올리기도 한다. <strong>(b) 검색해서</strong>: 똑같은 모델·똑같은 질문인데, <strong>찾아온 chunk 한 조각을 근거로 넣자 정확히 "4"</strong>라고 답한다.
+    바뀐 건 모델이 아니라 <strong>입력에 근거가 있느냐</strong>뿐이다. "<strong>모른다</strong>"를 "<strong>정답</strong>"으로 바꾸는 것 — 그게 retrieval-augmented generation이다.
+  </div>
+  <div class="callout note">
+    <strong>(a)의 지어낸 값은 실행마다 다르다.</strong> <code>1</code>·<code>8</code>·"순차 배포라 하나"·"모르겠다" 등으로 달라질 수 있다 — <strong>어느 쪽이든 "4"라고 확신하지 못한다</strong>는 게 핵심이다.
+    <strong>(b)는 근거가 있어 안정적으로 "4"</strong>를 답한다. 표현·문장은 매번 조금씩 달라도 <strong>숫자 4는 문서에서 온다</strong>.
+    (여기선 <code>search</code> 결과를 <strong>우리가 직접</strong> 프롬프트에 넣었다 — 클론에선 이 주입을 모델이 <code>search_docs</code> 도구로 <strong>스스로</strong> 하게 만든다.)
+  </div>
+
+  <h3>3) ★ 어휘의 한계 — 같은 뜻, 다른 단어 <span style="font-weight:normal">(experiment · API 없이)</span></h3>
+  <p>이번엔 <strong>일부러 실패</strong>시켜 본다. 대표 질문을 <strong>동의어로 바꿔</strong> — "동시에"→"한꺼번에", "배포"→"올리는", "서버"→"머신" —
+    <code>"Nimbus에서 한꺼번에 올리는 머신 개수 한도?"</code>라고 묻는다. 사람에겐 <strong>완전히 같은 질문</strong>이지만,
+    TF-IDF는 <strong>단어가 겹쳐야</strong> 점수가 나므로 정답 chunk를 <strong>놓친다</strong>. <code>step1.py</code>를 복사해 맨 아래 데모만 바꾼다(API 없음).</p>
+  <pre><code class="language-bash">cp practice/06-rag-knowledge/step1.py practice/06-rag-knowledge/step3.py</code></pre>
+  <p><strong>맨 아래 <code># ── 데모 …</code> 주석 이하를 통째로 지우고</strong> 아래로 교체한다:</p>
+  <pre><code class="language-python"># ── 데모 블록을 지우고 아래로 교체: 같은 뜻을 '다른 단어'로 물어본다 ──
+original = "Nimbus에서 동시에 배포하는 서버 수 기본값이 몇이야?"
+synonym = "Nimbus에서 한꺼번에 올리는 머신 개수 한도?"   # 동시에→한꺼번에, 배포→올리는, 서버→머신
+
+for label, q in [("원래 질문  ", original), ("동의어 질문", synonym)]:
+    print(f"[{label}] {q}")
+    print(f"           tokens: {tokenize(q)}")
+    for rank, (score, chunk) in enumerate(search(q), 1):
+        print(f"   [{rank}] score={score:.3f}  {chunk[:30]}...")
+    print()</code></pre>
+  <pre><code class="language-bash">uv run python practice/06-rag-knowledge/step3.py</code></pre>
+  <pre class="output">[원래 질문  ] Nimbus에서 동시에 배포하는 서버 수 기본값이 몇이야?
+           tokens: ['nimbus에서', '동시에', '배포하는', '서버', '수', '기본값이', '몇이야']
+   [1] score=0.433  nimbus.toml 의 max_parallel 키는 ...
+   [2] score=0.000  Nimbus는 우리 팀 내부에서 쓰는 배포 도구다. 설...
+   [3] score=0.000  프로덕션 배포는 nimbus ship 명령으로 한다. ...
+
+[동의어 질문] Nimbus에서 한꺼번에 올리는 머신 개수 한도?
+           tokens: ['nimbus에서', '한꺼번에', '올리는', '머신', '개수', '한도']
+   [1] score=0.000  Nimbus는 우리 팀 내부에서 쓰는 배포 도구다. 설...
+   [2] score=0.000  프로덕션 배포는 nimbus ship 명령으로 한다. ...
+   [3] score=0.000  배포를 되돌리려면 nimbus rollback &lt;버전&gt;...</pre>
+  <div class="callout warn">
+    <strong>★ 이건 버그가 아니라 어휘(lexical) 유사도의 본질적 한계다.</strong>
+    동의어 질문의 토큰(<code>한꺼번에</code>·<code>올리는</code>·<code>머신</code>·<code>개수</code>·<code>한도</code>)은 정답 chunk의 단어(<code>동시에</code>·<code>배포하는</code>·<code>서버</code>)와
+    <strong>하나도 겹치지 않는다</strong> → 모든 점수가 <strong>0.000</strong>이고, <strong>정답 chunk(<code>max_parallel</code>)는 top-3 안에 들지도 못한다</strong>(0점끼리라 원래 순서대로 밀려남).
+    TF-IDF 벡터의 차원은 <strong>단어 그 자체</strong>라, "동시에"와 "한꺼번에"는 <strong>서로 다른 차원</strong>이기 때문이다.
+    <strong>신경망 embedding</strong>은 이 둘을 <strong>가까운 벡터</strong>로 두어(의미) 잡아낸다 — <strong>그래서 프로덕션은 신경망 embedding을 쓴다.</strong>
+    업그레이드 경로는 한 줄이다: <strong><code>embed()</code>(우리의 <code>tfidf_vector</code>)만 신경망 임베딩 모델로 교체, 나머지 파이프라인은 그대로</strong>.
+    (Anthropic엔 임베딩 API가 <strong>없다</strong> — <code>client.embeddings…</code> 같은 코드는 존재하지 않는다. 그래서 이 실습은 TF-IDF를 <strong>직접</strong> 만든 것이다. 이건 설계이지 버그가 아니다.)
+  </div>
+  <div class="callout note">
+    <strong>어휘 검색을 "성공"시키는 법:</strong> 겹치는 단어를 쓰면 된다 — <code>synonym</code>을 <code>"Nimbus 동시에 배포하는 서버 수 한도?"</code>처럼
+    정답 chunk의 단어(<strong>동시에·배포·서버</strong>)를 넣어 다시 실행해 보라. 점수가 <strong>0에서 살아나</strong> <code>max_parallel</code> chunk가 다시 top-1으로 올라온다.
+    검색이 <strong>"뜻"이 아니라 "단어"에 반응</strong>한다는 걸 손으로 확인하는 순간이다.
+  </div>
+
+  <div class="callout note">
+    <strong>더 실험해 보기(각 1분).</strong>
+    <ul>
+      <li><strong><code>TOP_K = 1</code> 또는 <code>TOP_K = 5</code></strong>로 바꿔 <code>step1</code>을 돌려 보라 → <code>search</code>가 돌려주는 결과 수가 바뀐다(<code>← top-k</code> 경계가 이동).
+        RAG에서 "몇 개를 근거로 넣을까"를 정하는 다이얼이다(너무 많으면 노이즈·토큰↑, 너무 적으면 정답을 놓칠 위험).</li>
+      <li><strong><code>DOCS</code>에 문서를 더 넣어</strong> 보라(예: <code>"Nimbus 대시보드는 nimbus web 으로 연다."</code>). 어휘가 늘면 <code>idf</code>·점수가 바뀐다 — 노이즈를 늘려도 정답이 여전히 top-1인지 확인.</li>
+      <li><strong><code>chunk_text(text, max_chars=20)</code></strong>처럼 <code>max_chars</code>를 아주 작게 주면 한 문장이 여러 chunk로 쪼개진다 → chunk가 <strong>너무 작으면 맥락이 끊겨</strong> 검색이 나빠지는 걸 관찰(chunk 크기 트레이드오프).</li>
+      <li><strong><code>cosine</code>의 <code>if na and nb else 0.0</code>을 <code>dot / (na * nb)</code>로</strong> 바꾸고 동의어 질문(step3)을 돌리면? → 겹치는 단어 0이라 norm이 0 → <strong><code>ZeroDivisionError</code></strong>. 0-norm 가드가 왜 필요한지 몸으로 확인하고 되돌린다.</li>
+    </ul>
+  </div>
+
+  <div class="callout warn">
+    <strong>막히면:</strong>
+    <ul>
+      <li><strong><code>ZeroDivisionError</code> (cosine에서)</strong> → 질문이 어떤 chunk와도 겹치는 단어가 <strong>하나도 없어</strong> norm이 0이 됐다.
+        <code>cosine</code>의 <strong>0-norm 가드</strong>(<code>return dot / (na * nb) if na and nb else 0.0</code>)가 빠졌거나 잘못됐다. 겹침 0이면 <strong>유사도 0</strong>을 돌려줘야 한다.</li>
+      <li><strong>모든 점수가 이상하다 / 검색이 무의미하다</strong> → <code>compute_idf</code>에 평범한 <code>log(N/df)</code>를 썼다. 문서 몇 개짜리 작은 코퍼스에선
+        <strong>모든 chunk에 있는 단어의 idf가 0</strong>이 되어 벡터가 죽는다. <strong>smoothed</strong> <code>log((N+1)/(df+1))+1</code>을 쓴다.</li>
+      <li><strong>동의어로 물으니 못 찾는다</strong>(step3) → <strong>버그가 아니다.</strong> TF-IDF는 <strong>어휘</strong> 유사도라 "동시에"≠"한꺼번에"다(설계).
+        겹치는 단어로 묻거나, (프로덕션) 신경망 embedding으로 <code>embed</code>를 교체한다.</li>
+      <li><strong><code>AttributeError: module 'anthropic' has no attribute 'embeddings'</code> / <code>client.embeddings…</code>가 없다</strong> →
+        그런 API는 <strong>존재하지 않는다</strong>. Anthropic은 임베딩 엔드포인트를 제공하지 않는다 — 임베딩은 <code>tfidf_vector</code>(순수 파이썬)가 전부다. Claude는 (b)의 <strong>생성</strong>에만 쓴다.</li>
+      <li><strong><code>AuthenticationError</code> (401)</strong> → <code>step2</code>에서 <code>ANTHROPIC_API_KEY</code>가 없다/오타. <code>echo $ANTHROPIC_API_KEY</code>로 확인.
+        <strong><code>step1</code>·<code>step3</code>은 API를 안 부르니 키 없이도 된다</strong> — 검색만 확인하려면 이 둘부터.</li>
+      <li><strong>한글이 <code>깨져</code> 보이거나 토큰이 이상하다</strong> → 파일을 <strong>UTF-8</strong>로 저장했는지 확인. <code>tokenize</code>의 정규식 <code>[가-힣a-zA-Z0-9_]+</code>은
+        한글 음절·영문·숫자·밑줄만 남기고 <strong>공백·문장부호로 단어를 자른다</strong>(그래서 조사가 앞 단어에 붙는다 — step1 노트 참고).</li>
+      <li><strong><code>search_docs</code> 도구나 agent loop가 여기 왜 없나?</strong> → <strong>이번 실습엔 없다.</strong> 실습은 검색 <em>메커니즘</em>만 손에 익힌다(수동 RAG).
+        검색을 <strong>도구로 노출</strong>해 <strong>모델이 스스로 부르게</strong> 하는 건 <strong>클론(Hermes 만들기)</strong>의 몫이다 — 아래 노트 참고.</li>
+    </ul>
+  </div>
+
+  <div class="callout note">
+    <strong>클론으로 이어진다.</strong> 방금 만든 다섯 함수 — <strong><code>tokenize</code> · <code>chunk_text</code> · <code>compute_idf</code> · <code>tfidf_vector</code> · <code>cosine</code></strong> —
+    는 <strong>이름도 수식도 그대로</strong> Hermes의 <code>hermes/rag.py</code>에 들어간다. 달라지는 건 <em>소재</em>와 <em>포장</em>뿐이다:
+    실습의 하드코딩 <code>DOCS</code> 자리에 <strong>진짜 <code>kb/*.md</code> 파일</strong>이 들어오고, 실습의 <strong>수동 <code>search</code></strong>가 <code>class DocIndex</code>의 <code>.search()</code>로 캡슐화되며,
+    그 검색이 <strong><code>search_docs</code> 도구</strong>로 노출돼 — step2에서 <strong>우리가 손으로 넣던</strong> 그 chunk 주입을, 클론에선 <strong>모델이 스스로 <code>search_docs</code>를 불러</strong> 한다.
+    <em>실습에서 손으로 돌린 검색이, 클론에선 에이전트가 필요할 때 알아서 부르는 도구가 된다</em> — 이게 "RAG 파이프라인 → RAG 에이전트"의 도약이다.
+    (그리고 그 큰 능력을 붙이는데 <code>agent.py</code>는 <strong>한 줄도 안 바뀐다</strong> — <code>search_docs</code>는 그냥 도구 하나라 M3 루프가 이미 다 처리한다.)
+  </div>
+</section>
+
+        <!-- ========== Hermes 만들기 ========== -->
+<section class="module-section" id="clone">
+  <h2>Hermes 만들기</h2>
+  <p>이번 단계: <em>M4가 <code>agent.py</code>의 <q>여기가 <code>Memory</code> 자리</q> 주석을, M5가 <code>run_bash</code>의
+    <q>승인 게이트는 M5</q> 주석을 회수했듯 — M6는 <strong>M4·M5가 남긴 <q>외부 지식은 M6에서</q>라는 예고를 회수한다.</strong></em>
+    지금까지 Hermes는 <strong>학습된 지식 + 대화 history</strong>로만 답했다(M1: <code>stateless</code> + 학습 cutoff) →
+    <strong>로컬 파일·사내 규칙·최신 사실은 모르고, 물으면 지어낸다(hallucination).</strong>
+    M6는 로컬 문서를 <strong><code>chunk</code>로 쪼개 → TF-IDF로 <code>embedding</code> → <code>cosine</code> top-k로 검색</strong>하는
+    <code>rag.py</code>를 만들고, 그 검색을 <strong><code>search_docs</code> 도구로 노출</strong>한다. 그러면 모델이 스스로
+    <q>이건 모르니 검색하자</q>고 판단해 <code>search_docs</code>를 부르고(M3 agent loop <strong>그대로</strong>), 찾은 chunk를
+    <strong>근거(grounding)</strong>로 답한다 → Hermes가 <strong>RAG 에이전트</strong> 성격을 흡수한다.</p>
+
+  <p>개념↔코드 매핑 한 줄:
+    <strong>chunk</strong> = <code>chunk_text</code>,
+    <strong>embedding</strong> = <code>tfidf_vector</code>(우리 embedding),
+    <strong>vector search</strong> = <code>cosine</code> + top-k 정렬,
+    <strong>retrieval</strong> = <code>DocIndex.search</code> / <code>rag.search</code>,
+    <strong>retrieval을 도구로</strong> = <code>TOOLS</code>의 <code>search_docs</code> + <code>run_tool</code> 분기,
+    <strong>RAG = 검색 + 생성</strong> = 모델이 <code>search_docs</code>를 부르고(검색) 그 <code>tool_result</code> chunk로 답을 생성(생성),
+    <strong>새 능력 = 새 도구</strong> = <code>agent.py</code> <strong>무변경</strong>.</p>
+
+  <div class="callout note">
+    <strong>전제:</strong> M5까지 만든 <code>clone-project/hermes/</code>(<code>config.py</code>, <code>llm.py</code>, <code>tools.py</code>,
+    <code>memory.py</code>, <code>agent.py</code>, <code>__main__.py</code>) 위에 더한다. 이번 변화는 —
+    <strong>신규 2종</strong>(<code>rag.py</code> + <code>kb/*.md</code>), <strong>수정 2개</strong>(<code>config.py</code>·<code>tools.py</code>),
+    <strong>상수 1개 확장</strong>(<code>llm.py</code>의 <code>SYSTEM</code>), 그리고 <strong>무변경 3개</strong>(<code>agent.py</code>·<code>memory.py</code>·<code>__main__.py</code>).
+    참조 해답: <code>clone-project/_solution/06-rag-knowledge/hermes/</code> (막히면 <code>diff</code>로 대조).
+  </div>
+
+  <div class="callout warn">
+    <strong>★ 새 패키지를 <em>하나도</em> 설치하지 않는다:</strong> <code>rag.py</code>는 <strong>표준 라이브러리만</strong> 쓴다
+    (<code>math</code>·<code>re</code>·<code>os</code>/<code>glob</code>·<code>collections</code>). <code>requirements.txt</code>·<code>pyproject.toml</code>에
+    <code>numpy</code>도 <code>scikit-learn</code>도 vector DB도 <strong>추가하지 않는다</strong>.
+    <q>vector DB를 안 깔았는데 RAG가 된다</q> — 그게 이 모듈의 메시지다. <strong>임베딩은 <code>rag.py</code>의 TF-IDF가 전부</strong>이고,
+    Claude API를 임베딩에 부르지 않는다(<code>client.embeddings…</code> 같은 API는 <strong>존재하지 않는다</strong> — 아래 <code>rag.py</code> 주석 참고).
+  </div>
+
+  <div class="callout warn">
+    <strong>★ memory(M4) ≠ RAG(M6) — M4에서 미뤄 둔 그 구분을 여기서 닫는다:</strong>
+    <strong>memory</strong>(M4, <code>memory.py</code>) = <q>방금까지 무슨 대화를 했나</q>를 이어가는 <strong>working memory</strong>(history 저장·요약).
+    <strong>RAG</strong>(M6, <code>rag.py</code>) = <q>내가 모르는 외부 지식을 검색해 넣기</q>(embedding·유사도 검색).
+    <strong>저장·요약(M4)이 아니라 검색·주입(M6)</strong>이다. 둘은 대체가 아니라 <strong>보완재</strong> — memory는 대화를 잇고, RAG는 사실을 끌어온다.
+    (검색해 온 chunk도 결국 <code>tool_result</code>로 <strong>history에 쌓여</strong> <code>context window</code>를 먹고, 길어지면 M4 <code>compaction</code>이 접는다.)
+  </div>
+
+  <div class="callout note">
+    <strong>실습과의 관계:</strong> <q>직접 사용해보기</q>에서 <strong>하드코딩 <code>DOCS</code></strong>로 손에 익힌 다섯 함수 —
+    <code>tokenize</code> · <code>chunk_text</code> · <code>compute_idf</code> · <code>tfidf_vector</code> · <code>cosine</code> — 가
+    <strong>이름도 수식도 그대로</strong> 여기서 다시 쓰인다. 달라지는 건 <em>소재</em>와 <em>포장</em>뿐이다:
+    실습의 스크립트 상수 <code>DOCS</code> 자리에 <strong>진짜 <code>kb/</code> 파일</strong>이 들어오고,
+    실습의 <strong>수동 top-k</strong>가 <code>class DocIndex</code>의 <code>.search()</code>로 캡슐화되며,
+    그 검색이 <strong><code>search_docs</code> 도구</strong>로 노출돼 <strong>모델이 스스로 부른다</strong>.
+    <em>실습에서 손으로 돌린 그 검색이, 클론에선 에이전트가 필요할 때 알아서 부르는 도구가 된다</em> — 이게 <q>RAG 파이프라인 → RAG 에이전트</q>의 도약이다.
+  </div>
+
+  <h3>M5 → M6: 변화 요약 — <strong><code>agent.py</code>는 <em>diff가 없다</em></strong> (먼저 고지)</h3>
+  <p>지금 무엇을/왜: 이 모듈의 핵심을 <strong>먼저</strong> 못 박는다 — <strong>RAG라는 큰 능력을 붙이는데 agent loop는 한 글자도 안 바뀐다.</strong>
+    <code>search_docs</code>는 그냥 하나의 도구라, 모델이 부르면 <strong>M2의 <code>tool_use</code>↔<code>tool_result</code> 왕복 + M3의 while 루프</strong>가
+    <strong>이미</strong> 다 처리한다. 위험하지도 않아 M5 게이트의 <code>else: run_tool(...)</code> 경로로 <strong>그대로 흐른다</strong>.
+    아래는 <code>agent.py</code>에서 <strong>바꾸지 않을</strong> 기존 코드다 — <code>search_docs</code>가 어디로 흐르는지만 표시했다.</p>
+  <pre><code class="language-python"># hermes/agent.py — M5 코드 그대로(무변경). search_docs는 아래 '기존' 경로로 흐른다:
+            for block in resp.content:
+                if block.type == "tool_use":
+                    # ① 게이트: search_docs ∉ DANGEROUS_TOOLS → 건너뜀(읽기 전용이라 안 묻는다)
+                    if block.name in DANGEROUS_TOOLS and not confirm(block.name, block.input):
+                        ...
+                        continue
+                    # ② 분기: search_docs ≠ update_plan → else 로
+                    if block.name == "update_plan":
+                        result = self._update_plan(block.input["steps"])
+                    else:
+                        result = run_tool(block.name, block.input)   # ← search_docs 가 여기로 (read_file 과 같은 길)</code></pre>
+  <p>그래서 M6에서 실제로 손대는 곳은 <strong>루프 밖</strong>이다: 신규 <code>rag.py</code>, <code>tools.py</code>에 도구 하나(스키마+함수+디스패치),
+    <code>config.py</code> 상수 2개, <code>SYSTEM</code> 한 문단, 신규 <code>kb/</code>. 순서대로 만들자.</p>
+
+  <h3>1) <code>clone-project/kb/</code> — 문서 폴더 만들기 (먼저)</h3>
+  <p>지금 무엇을/왜: 검색할 <strong>지식 기반</strong>을 먼저 둔다. 소재는 <strong>가짜 사내 배포 도구 <q>Nimbus</q></strong> 문서다.
+    <strong>왜 가짜(지어낸) 사실인가:</strong> 모델이 <em>이미 아는</em> 사실이면 RAG 없이도 답해 버려 RAG의 효과가 안 보인다.
+    <strong>Nimbus의 <code>max_parallel</code> 기본값이 <code>4</code>라는 건 이 문서에만 있는, 모델이 절대 알 수 없는 사실</strong> — 그래서 반드시 검색해야만 답할 수 있다.
+    <code>clone-project/</code> 아래에 <code>kb/</code> 폴더를 만들고 <code>.md</code> 4개를 둔다(<code>_solution</code> 안이 아니라 <strong>학습자 실제 프로젝트</strong>에 — <code>KB_DIR</code>이 여기를 가리킨다).</p>
+  <pre><code class="language-bash">cd clone-project
+mkdir -p kb</code></pre>
+  <pre><code class="language-markdown"># kb/nimbus-overview.md
+
+# Nimbus 개요
+
+Nimbus는 우리 팀 내부에서 쓰는 배포 도구다. 서비스 배포와 롤백을 명령 한 줄로 처리한다.
+
+Nimbus의 설정 파일은 프로젝트 루트의 nimbus.toml 이다. 배포 대상, 서버 목록, 옵션을 여기에 적는다.</code></pre>
+  <pre><code class="language-markdown"># kb/nimbus-deploy.md
+
+# Nimbus 배포 명령
+
+프로덕션 배포는 nimbus ship 명령으로 한다. 스테이징에만 배포하려면 nimbus ship --stage 를 쓴다.
+
+배포를 되돌리려면 nimbus rollback &lt;버전&gt; 을 실행한다. 배포된 버전 목록은 nimbus versions 로 확인한다.</code></pre>
+  <pre><code class="language-markdown"># kb/nimbus-config.md   ← 대표 질문의 정답(max_parallel = 4)이 여기 있다
+
+# Nimbus 설정 (nimbus.toml)
+
+nimbus.toml 의 max_parallel 키는 한 번에 동시에 배포하는 서버 수를 정한다. max_parallel 기본값은 4다. 즉 값을 지정하지 않으면 서버 4대에 동시에 배포한다.
+
+timeout 키는 배포 한 단계의 제한 시간을 초 단위로 정한다. 기본값은 300이다.</code></pre>
+  <pre><code class="language-markdown"># kb/team-notes.md   ← 노이즈 문서(검색이 제대로 '배제'하는지 확인용)
+
+# 팀 잡담 메모
+
+이번 주 팀 점심 메뉴: 화요일은 김치찌개, 금요일은 파스타.
+
+다음 주 회식 장소는 아직 미정이다. 좋은 곳 있으면 공유해 주세요.</code></pre>
+  <div class="callout note">
+    <strong>이 4개의 의도:</strong> Nimbus 문서 3개(overview/deploy/config)는 <strong>정답 인출</strong>을, 점심 메뉴 노이즈 1개는 <strong>정밀도</strong>(관련 없는 건 안 물어옴)를 시험한다.
+    <code>kb/</code>는 <strong>커밋 대상</strong>이다 — 모든 학습자가 공유하는 샘플 지식 기반이다.
+  </div>
+
+  <h3>2) <code>hermes/config.py</code> — <code>KB_DIR</code>·<code>TOP_K</code> 추가</h3>
+  <p>지금 무엇을/왜: <strong>어느 폴더를</strong> 색인하고 <strong>몇 개를</strong> 돌려줄지를 상수로 못 박는다.
+    <code>DANGEROUS_TOOLS</code>(M5) 옆, <code>config.py</code> <strong>맨 아래에 이어서</strong> 추가한다. 나머지 상수는 그대로.</p>
+  <pre><code class="language-python"># hermes/config.py  (맨 아래에 이어서 추가)
+
+# M6 — RAG &amp; Knowledge: 로컬 지식 기반(문서 폴더)과 검색 결과 개수
+KB_DIR = "kb"     # clone-project/kb (cwd=clone-project 기준). rag.py가 이 폴더의 파일을 색인한다.
+TOP_K = 3         # search가 돌려줄 상위 chunk 수</code></pre>
+  <div class="callout warn">
+    <strong><code>KB_DIR = "kb"</code>는 <em>상대 경로</em>다:</strong> <code>cwd</code>(현재 디렉토리) 기준이라, <strong>반드시 <code>clone-project/</code>에서
+    <code>uv run python -m hermes</code>를 실행</strong>해야 <code>kb/</code>가 보인다. 다른 폴더에서 돌리면 검색이 늘 비어 나온다(아래 <q>막히면</q> 참고).
+  </div>
+
+  <h3>3) <code>hermes/rag.py</code> — 신설 (★ 이 모듈의 핵심 backend)</h3>
+  <p>지금 무엇을/왜: <strong>순수 파이썬 TF-IDF + cosine</strong> RAG backend를 짓는다. 조각으로 누적하자.
+    먼저 <strong>파일 머리</strong> — 설계 고백 주석과 <code>import</code>다. <strong>★ <code>rag.py</code>는 <code>config</code>만 import한다</strong>
+    (<code>llm</code> 불필요 — 임베딩에 Claude를 안 쓴다. 그래서 <strong>API 키 없이도</strong> 검색이 돈다).</p>
+  <pre><code class="language-python"># hermes/rag.py  (신규 파일)
+"""Hermes의 지식 검색(RAG) backend — 로컬 문서를 TF-IDF로 embedding해 cosine 유사도로 검색한다.
+
+★ Anthropic에는 임베딩(embeddings) API가 없다 — claude-api-cheatsheet에도 없다.
+   그래서 embedding을 순수 파이썬 TF-IDF(어휘 기반 스파스 벡터)로 '직접' 만든다.
+   이건 버그가 아니라 설계다: 파이프라인(chunk → embed → cosine top-k → 주입 → 생성)은
+   프로덕션 RAG와 100% 동일하고, 프로덕션과 다른 seam은 embed(text) -&gt; vector 함수 딱 한 곳이다
+   (어휘(lexical) 유사도 → 신경망 의미(semantic) 유사도). numpy·vector DB 없이 표준 라이브러리만.
+"""
+import math
+import os
+import glob
+import re
+from collections import Counter
+
+from .config import KB_DIR, TOP_K   # rag는 config만 import한다(llm 불필요 — 임베딩에 Claude를 안 쓴다)</code></pre>
+  <div class="callout why">
+    <strong>왜 TF-IDF인가 — 버그가 아니라 설계:</strong> <code>claude-api-cheatsheet.md</code>엔 임베딩 API가 <strong>없다</strong>.
+    Anthropic은 자체 임베딩 엔드포인트를 <strong>제공하지 않는다</strong> → <code>client.embeddings.create(...)</code> 같은 코드는 <strong>존재하지 않는다</strong>.
+    그래서 embedding을 <strong>순수 파이썬 TF-IDF</strong>로 직접 만든다. <strong>TF-IDF도 진짜 embedding이다</strong> —
+    <q>텍스트 → 벡터, 유사도 = 벡터 거리</q>라는 정의를 그대로 만족한다. 다만 <strong>어휘(lexical, 단어 겹침)</strong> 기반이지 <strong>의미(semantic)</strong> 기반이 아니다.
+    <strong>파이프라인·<code>search_docs</code>·agent loop는 프로덕션과 100% 동일</strong>하고, 프로덕션과 다른 <strong>seam은 <code>embed(text) -&gt; vector</code> 함수 딱 한 곳</strong>이다
+    (프로덕션은 이걸 신경망 임베딩 모델로 교체 — 나머지는 그대로). <em>임베딩을 <q>교체 가능한 한 함수</q>로 이해하는 게 오히려 더 깊은 학습이다.</em>
+  </div>
+
+  <p>지금 무엇을/왜: 텍스트를 다루는 <strong>두 헬퍼</strong>다. <code>tokenize</code>는 <strong>query와 chunk를 같은 규칙으로</strong> 쪼개고
+    (같은 규칙이라야 같은 벡터 공간에 놓인다), <code>chunk_text</code>는 개념 <strong>chunk</strong>의 실체 — 문서를 검색·임베딩의 단위로 쪼갠다.</p>
+  <pre><code class="language-python"># hermes/rag.py  (이어서)
+
+def tokenize(text: str) -&gt; list:
+    """소문자화 + 한글/영문/숫자 단어만 추출. query와 chunk가 '같은 규칙'으로 쪼개져야
+    같은 벡터 공간에 놓인다 — 그래서 이 함수 하나를 양쪽에서 공용한다."""
+    return re.findall(r"[가-힣a-zA-Z0-9_]+", text.lower())
+
+
+def chunk_text(text: str, max_chars: int = 500) -&gt; list:
+    """문서를 검색·임베딩의 단위인 chunk로 쪼갠다. 문단(빈 줄) 기준으로 나누고,
+    한 문단이 너무 길면 max_chars로 잘라 여러 chunk로 만든다.
+    (chunk가 너무 크면 유사도가 희석되고, 너무 작으면 맥락이 끊긴다 — 여기선 단순한 문단 방식.)"""
+    chunks = []
+    for para in re.split(r"\n\s*\n", text):     # 빈 줄로 문단 분리
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) &lt;= max_chars:
+            chunks.append(para)
+        else:                                    # 너무 길면 고정 길이로 더 자른다
+            for i in range(0, len(para), max_chars):
+                chunks.append(para[i:i + max_chars])
+    return chunks</code></pre>
+  <div class="callout note"><strong>개념↔코드:</strong> 개념 <strong>chunk</strong> = 함수 <code>chunk_text()</code>. 실습에서 짧은 <code>DOCS</code>로 돌린 그 <code>chunk_text</code>와 <strong>같은 함수</strong>다 — 여기선 <code>.md</code> 파일 내용을 넣을 뿐.</div>
+
+  <p>지금 무엇을/왜: <strong>이 모듈의 개념 축</strong>이다. <code>compute_idf</code>(코퍼스 IDF) → <code>tfidf_vector</code>(<strong>우리 embedding</strong>) → <code>cosine</code>(<strong>vector search의 거리 함수</strong>).
+    세 함수가 <q>텍스트 → 벡터 → 유사도</q>를 완성한다.</p>
+  <pre><code class="language-python"># hermes/rag.py  (이어서)
+
+def compute_idf(chunk_token_lists: list) -&gt; dict:
+    """코퍼스 전체의 IDF(역문서빈도)를 계산한다. ★ smoothed 공식:
+        idf(t) = log((N+1) / (df(t)+1)) + 1
+    ⚠ 평범한 log(N/df)는 '모든 chunk에 있는 단어'의 idf를 0으로 만들어(→ 벡터가 죽는다),
+       문서 수가 적은 작은 코퍼스에서 특히 위험하다. +1 smoothing이 그걸 막는다."""
+    N = len(chunk_token_lists)
+    df = Counter()
+    for tokens in chunk_token_lists:
+        for t in set(tokens):                    # 한 chunk에서 같은 단어는 한 번만(document frequency)
+            df[t] += 1
+    return {t: math.log((N + 1) / (df_t + 1)) + 1 for t, df_t in df.items()}
+
+
+def tfidf_vector(tokens: list, idf: dict) -&gt; dict:
+    """★ 우리의 embedding — 토큰 리스트를 {단어: TF-IDF 가중치} 스파스 벡터(dict)로 만든다.
+    query도 반드시 '코퍼스에서 만든 같은 idf'로 벡터화해야 같은 공간에 놓인다."""
+    tf = Counter(tokens)
+    n = len(tokens) or 1                          # 빈 입력의 0으로 나누기 방지
+    return {t: tf[t] / n * idf.get(t, 0.0) for t in tf}
+
+
+def cosine(a: dict, b: dict) -&gt; float:
+    """두 스파스 벡터(dict)의 코사인 유사도. 방향(각도)만 보므로 문서 길이에 안 휘둘린다."""
+    dot = sum(w * b.get(t, 0.0) for t, w in a.items())
+    na = math.sqrt(sum(w * w for w in a.values()))
+    nb = math.sqrt(sum(w * w for w in b.values()))
+    return dot / (na * nb) if na and nb else 0.0  # ★ 0-norm 가드: 겹치는 단어 0이면 ZeroDivisionError</code></pre>
+  <div class="callout why">
+    <strong>두 곳의 함정을 미리 막았다:</strong>
+    ① <strong>smoothed idf</strong> — 평범한 <code>log(N/df)</code>는 <em>모든</em> chunk에 있는 단어의 idf를 <code>0</code>으로 만든다.
+    문서 몇 개짜리 작은 코퍼스에선 흔한 단어가 많아 <strong>벡터가 통째로 죽을</strong> 수 있다. <code>log((N+1)/(df+1))+1</code>은 최소 <code>1</code> 이상을 보장한다.
+    ② <strong>0-norm 가드</strong> — query가 어떤 chunk와도 겹치는 단어가 <strong>하나도 없으면</strong> norm이 <code>0</code>이라 <code>dot/(na*nb)</code>가
+    <strong><code>ZeroDivisionError</code></strong>다. <code>if na and nb else 0.0</code>이 그때 <strong>유사도 0</strong>을 돌려준다(= <q>안 겹침</q>).
+  </div>
+  <div class="callout note">
+    <strong>개념↔코드:</strong> 개념 <strong>embedding</strong> = <code>tfidf_vector()</code>(우리 embedding의 실체). 개념 <strong>vector search</strong>의 거리 계산 = <code>cosine()</code>.
+    <strong>실습의 다섯 함수와 이름·수식이 100% 동일</strong>하다 — 실습에서 점수를 눈으로 본 그 <code>cosine</code>이 바로 이거다.
+  </div>
+
+  <p>지금 무엇을/왜: 이제 <strong>상태(색인)를 소유하는 클래스</strong> <code>DocIndex</code>다 — M4의 <code>class Memory</code>와 같은 계보다.
+    <code>build</code>는 폴더를 읽어 chunk 벡터·idf를 들고 있고, <code>search</code>는 <strong>retrieval의 실체</strong>다
+    (query를 <strong>같은 <code>self.idf</code>로</strong> 벡터화 → 각 chunk와 <code>cosine</code> → 내림차순 top-k).</p>
+  <pre><code class="language-python"># hermes/rag.py  (이어서)
+
+class DocIndex:
+    """색인(상태)을 소유하는 클래스 — M4의 class Memory와 같은 계보다.
+    build로 폴더를 읽어 chunk 벡터들과 idf를 들고 있고, search로 질의에 답한다."""
+
+    def __init__(self):
+        self.chunks = []      # chunk 원문(list[str]) — 검색 결과로 이걸 돌려준다
+        self.vectors = []     # 각 chunk의 embedding(list[dict]) — chunks와 같은 순서
+        self.idf = {}         # 코퍼스 idf — query 벡터화에도 '같은' 걸 쓴다
+
+    def build(self, folder: str) -&gt; "DocIndex":
+        """folder의 .md 파일들을 읽어 chunk → idf → chunk 벡터로 색인한다."""
+        self.chunks = []
+        for path in sorted(glob.glob(os.path.join(folder, "*.md"))):
+            with open(path, "r", encoding="utf-8") as f:
+                self.chunks.extend(chunk_text(f.read()))
+        token_lists = [tokenize(c) for c in self.chunks]
+        self.idf = compute_idf(token_lists)
+        self.vectors = [tfidf_vector(toks, self.idf) for toks in token_lists]
+        return self           # build().search() 로 이어 쓸 수 있게 self 반환
+
+    def search(self, query: str, k: int = TOP_K) -&gt; list:
+        """★ retrieval의 실체 — query를 '같은 idf'로 벡터화해 각 chunk와 cosine을 재고,
+        높은 순으로 상위 k개 chunk 텍스트를 반환한다(점수 0=전혀 안 겹침은 버린다)."""
+        qv = tfidf_vector(tokenize(query), self.idf)
+        scored = [(cosine(qv, v), c) for v, c in zip(self.vectors, self.chunks)]
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [c for score, c in scored[:k] if score &gt; 0]</code></pre>
+  <div class="callout why">
+    <strong>핵심 한 줄 — query도 <code>self.idf</code>로 벡터화한다:</strong> chunk를 색인할 때 쓴 <strong>바로 그 <code>idf</code></strong>로 query도 <code>tfidf_vector</code>한다.
+    그래야 둘이 <strong>같은 벡터 공간</strong>에 놓여 <code>cosine</code>이 의미를 갖는다. 그리고 <strong>점수 0인 chunk는 버린다</strong>
+    (<code>if score &gt; 0</code>) — 전혀 안 겹치는 문서를 top-k 채우기용으로 물어오면 오히려 노이즈이고, 이게 <strong>grounding</strong>(없으면 <q>모른다</q>)의 토대가 된다.
+  </div>
+
+  <p>지금 무엇을/왜: <code>tools.py</code>가 부를 <strong>모듈 레벨 진입점</strong> <code>search(query)</code>다.
+    <strong>게으른 싱글턴</strong> — <code>import</code> 시점이 아니라 <strong>첫 검색 때</strong> 파일을 읽어 색인한다(파일 I/O를 import에 두지 않기).</p>
+  <pre><code class="language-python"># hermes/rag.py  (파일 끝)
+
+# 모듈 레벨 게으른 싱글턴 — import 시점이 아니라 '첫 검색 때' 파일을 읽어 색인한다.
+_INDEX = None
+
+
+def search(query: str, k: int = TOP_K) -&gt; list:
+    """tools.py가 부르는 검색 진입점. 처음 불릴 때 KB_DIR을 색인하고, 이후엔 재사용한다."""
+    global _INDEX
+    if _INDEX is None:
+        _INDEX = DocIndex().build(KB_DIR)
+    return _INDEX.search(query, k)</code></pre>
+
+  <h3>돌려보기 (중간 점검) — <code>rag.py</code> 단독, <strong>키 없이</strong></h3>
+  <p>도구로 엮기 전에 <strong>검색 부품만</strong> 먼저 확인한다(M2·M5 step1의 <q>부품 먼저</q> 전통 — 과금 0원, API 키 불필요).
+    <code>clone-project/</code>에서 실행해 <code>KB_DIR="kb"</code>가 <code>clone-project/kb/</code>를 가리키게 한다.</p>
+  <pre><code class="language-bash">cd clone-project
+uv run python -c "from hermes import rag; print(rag.search('Nimbus에서 동시에 배포하는 서버 수 기본값이 몇이야?')[0][:60])"</code></pre>
+  <pre class="output">nimbus.toml 의 max_parallel 키는 한 번에 동시에 배포하는 서버 수를 정한다. max_p</pre>
+  <p><strong><code>max_parallel</code> chunk가 top-1</strong>으로 나오면 색인·검색이 제대로 붙은 것이다(점심 메뉴 노이즈는 점수 0이라 결과 밖).
+    안 나오면 아래 <q>막히면</q>의 <code>KB_DIR</code>·<code>cwd</code> 항목부터 본다.</p>
+
+  <h3>4) <code>hermes/tools.py</code> — <code>search_docs</code> 추가(스키마 + 함수 + 디스패치)</h3>
+  <p>지금 무엇을/왜: 검색을 <strong>도구로 노출</strong>한다. <code>read_file</code>과 <strong>똑같은 방식</strong>으로 정의된다(M2의 뿌리 — <q>새 능력 = 도구 하나 더</q>).
+    먼저 <strong>import 한 줄</strong>을 <code>tools.py</code> 상단에 추가한다.</p>
+  <pre><code class="language-python"># hermes/tools.py  (파일 상단, import subprocess 아래)
+from . import rag   # M6 — search_docs가 부르는 RAG backend(로컬 문서 TF-IDF 검색)</code></pre>
+
+  <p>지금 무엇을/왜: <code>TOOLS</code> 리스트의 <strong>마지막 원소(<code>update_plan</code>) 다음</strong>, 리스트를 닫는 <code>]</code> <strong>앞</strong>에 스키마를 추가한다.</p>
+  <pre><code class="language-python"># hermes/tools.py  (TOOLS 리스트 안 — update_plan 원소 다음에 이어서)
+
+    # M6 — search_docs: 로컬 지식 기반(kb/)을 검색하는 도구. read_file과 같은 부류의
+    # '바깥 지식 조회' 도구라 스키마·구현·디스패치가 전부 tools.py에 산다(update_plan과 정반대).
+    {
+        "name": "search_docs",
+        "description": "로컬 지식 기반(kb/) 문서를 검색해 질문과 가장 관련된 문단들을 반환한다. "
+                       "사내 규칙·프로젝트 문서 등 '학습으로는 알 수 없는' 사실을 물으면 이 도구로 먼저 찾는다.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "찾고 싶은 내용(자연어 질문/키워드)"},
+            },
+            "required": ["query"],
+        },
+    },</code></pre>
+
+  <p>지금 무엇을/왜: <strong>실행 함수</strong>를 추가하고(<code>run_bash</code> 다음, <code>run_tool</code> 위), <strong><code>run_tool</code> 디스패처에 분기 한 줄</strong>을 더한다.
+    <strong>★ <code>update_plan</code>과 정반대다</strong> — <code>search_docs</code>는 <q>바깥 지식 조회</q> 보통 도구라 핸들러가 <strong><code>run_tool</code> 안</strong>에 산다.</p>
+  <pre><code class="language-python"># hermes/tools.py  (run_bash 함수 다음, run_tool 함수 앞에 추가)
+
+def search_docs(query: str) -&gt; str:
+    """kb/ 문서를 검색해 관련 chunk들을 '하나의 문자열'로 join해 돌려준다(M6).
+    ★ rag.search는 list[str]을 준다 — 리스트를 그대로 반환하면 tool_result content가
+      문자열이 아니라서 다음 create가 400이다(M2/M3 규칙). 그래서 반드시 join하고,
+      결과가 없으면 빈 문자열 대신 '(관련 문서 없음)'을 돌려준다(빈 문자열도 400)."""
+    hits = rag.search(query)
+    return "\n\n---\n\n".join(hits) or "(관련 문서 없음)"</code></pre>
+  <pre><code class="language-python"># hermes/tools.py  (run_tool 안 — run_bash 분기 다음, 마지막 fallback 앞에 한 줄 추가)
+
+    if name == "run_bash":
+        return run_bash(tool_input["cmd"])
+    if name == "search_docs":                     # M6 — '바깥 지식 조회' 도구라 여기 넣는다
+        return search_docs(tool_input["query"])
+    return f"[unknown tool: {name}]"</code></pre>
+  <div class="callout why">
+    <strong>새 도구의 <q>자리</q>와 <q>게이트</q>는 M5의 두 질문이 그대로 답한다:</strong>
+    <strong>① 바깥이냐, 자신이냐?</strong> → <code>search_docs</code>는 <strong>바깥 지식(<code>kb/</code> 문서)을 조회</strong>한다(<code>read_file</code>과 같은 부류) →
+    스키마·함수·디스패치 <strong>전부 <code>tools.py</code></strong>. (<code>update_plan</code>은 <code>self.plan</code>이라 <code>agent.py</code>였다 — 정반대.)
+    <strong>② 되돌릴 수 있느냐?</strong> → <code>search_docs</code>는 <strong>읽기 전용</strong>이다. 파일을 쓰지도, 셸을 돌리지도, 밖으로 보내지도 않는다 →
+    잘못 검색해도 <strong>되돌릴 게 없다</strong> → <code>DANGEROUS_TOOLS</code>에 <strong>넣지 않는다</strong>(승인 게이트 없이 자동 실행, <code>read_file</code>과 동일).
+  </div>
+  <div class="callout warn">
+    <strong>★ 반환은 반드시 <em>문자열</em>:</strong> <code>rag.search</code>는 <strong><code>list[str]</code></strong>을 준다. 그 리스트를 <code>return</code>해 버리면
+    <code>tool_result</code>의 <code>content</code>가 문자열이 아니라서 다음 <code>create</code>가 <strong>400</strong>
+    (<code>tool_result content must be a string</code>)이다. <strong>M3 실습에서 이미 겪은 그 400</strong>이다.
+    그래서 <code>"\n\n---\n\n".join(hits)</code>로 문자열화하고, 결과가 비면 빈 문자열(그것도 400) 대신 <code>"(관련 문서 없음)"</code>을 돌려준다.
+  </div>
+
+  <h3>5) <code>hermes/llm.py</code> — <code>SYSTEM</code>에 grounding 정책 한 문단</h3>
+  <p>지금 무엇을/왜: 모델에게 <strong>먼저 검색하고, 없으면 모른다고 하라</strong>고 일러둔다. 함수 추가도 시그니처 변경도 없다 —
+    <strong><code>SYSTEM</code> 문자열만</strong> 늘린다. M5에서 <code>system</code>이 <q>말투</q>를 넘어 <q>정책</q>(먼저 계획하라)이 됐는데,
+    <strong>M6는 거기에 <q>grounding 정책</q>(먼저 검색하라)을 한 문단 더 얹는다</strong>.</p>
+  <pre><code class="language-python"># BEFORE — M5의 SYSTEM (persona + 계획/승인 정책)
+SYSTEM = """너는 Hermes라는 간결한 한국어 도우미야. 군더더기 없이 핵심만 답한다.
+
+여러 단계가 필요한 목표를 받으면, 가장 먼저 update_plan 도구로 계획(단계 목록)을 세운 뒤 실행을 시작한다.
+계획이 바뀌면 update_plan을 다시 호출해 갱신한다.
+write_file·run_bash처럼 되돌리기 어려운 도구는 사용자 승인이 필요하다. 거부당하면 같은 도구를 억지로
+다시 부르지 말고, 다른 방법을 찾거나 사용자에게 무엇을 원하는지 물어본다."""</code></pre>
+  <pre><code class="language-python"># AFTER — hermes/llm.py 의 SYSTEM (맨 끝에 grounding 문단 한 개 추가. ask/chat/stream_chat는 그대로)
+SYSTEM = """너는 Hermes라는 간결한 한국어 도우미야. 군더더기 없이 핵심만 답한다.
+
+여러 단계가 필요한 목표를 받으면, 가장 먼저 update_plan 도구로 계획(단계 목록)을 세운 뒤 실행을 시작한다.
+계획이 바뀌면 update_plan을 다시 호출해 갱신한다.
+write_file·run_bash처럼 되돌리기 어려운 도구는 사용자 승인이 필요하다. 거부당하면 같은 도구를 억지로
+다시 부르지 말고, 다른 방법을 찾거나 사용자에게 무엇을 원하는지 물어본다.
+
+프로젝트나 로컬 문서에 있을 법한 사실(사내 도구·설정·규칙 등)을 물으면, 추측하지 말고 먼저
+search_docs 도구로 근거를 찾은 뒤 그 내용에 기반해 답한다. 검색 결과에 답이 없으면 모른다고 말한다."""</code></pre>
+  <div class="callout warn">
+    <strong>이건 <q>부탁</q>이지 <q>강제</q>가 아니다:</strong> <code>SYSTEM</code>에 <q>먼저 검색하라</q>고 적어도 모델이 <strong>안 지킬 수 있다</strong>.
+    M5에서 배운 <q>프롬프트는 부탁, 강제는 코드</q>가 그대로다 — 다만 <strong>검색은 위험하지 않아 <em>강제할 필요가 없다</em></strong>(승인 게이트는 <code>write_file</code>·<code>run_bash</code>의 몫).
+    검색을 <em>반드시</em> 시키고 싶다면 코드로(예: 매 질문 전 강제 검색) — 그건 범위 밖이다.
+  </div>
+
+  <h3>6) 무변경 확인 — <code>agent.py</code> · <code>memory.py</code> · <code>__main__.py</code> (★ 이 모듈의 클라이맥스)</h3>
+  <p>지금 무엇을/왜: <strong>이번 모듈에서 <code>agent.py</code>를 열지도 않는다.</strong> RAG라는 큰 능력을 붙였는데 <strong>루프는 손도 안 댔다</strong> —
+    이게 M4의 <q>llm/__main__ 무변경</q>, M5의 <q>memory/__main__ 무변경</q>을 잇는 <strong>캡슐화/확장성의 증거</strong>다.
+    정답 스냅샷끼리 비교하면 M5→M6에 <strong>바뀐 파일이 정확히 보인다</strong>:</p>
+  <pre><code class="language-bash">cd clone-project
+diff -rq _solution/05-planning-autonomy/hermes _solution/06-rag-knowledge/hermes</code></pre>
+  <pre class="output">Files …/05-planning-autonomy/hermes/config.py and …/06-rag-knowledge/hermes/config.py differ
+Files …/05-planning-autonomy/hermes/llm.py and …/06-rag-knowledge/hermes/llm.py differ
+Only in …/06-rag-knowledge/hermes: rag.py
+Files …/05-planning-autonomy/hermes/tools.py and …/06-rag-knowledge/hermes/tools.py differ</pre>
+  <p><code>agent.py</code>·<code>memory.py</code>·<code>__main__.py</code>·<code>__init__.py</code>는 <strong>목록에 없다</strong> — 바이트 단위로 동일하다.
+    바뀐 건 <code>config.py</code>·<code>llm.py</code>·<code>tools.py</code>와 신규 <code>rag.py</code>뿐이다.</p>
+  <div class="callout why">
+    <strong>왜 루프를 안 고쳐도 되나 — ReAct의 관점:</strong> M3에서 agent loop를 완성한 뒤로, <strong>새 능력을 붙이는 방법은 <q>루프를 고치는 것</q>이 아니라 <q>도구를 더하는 것</q></strong>이었다.
+    <code>read_file</code>(M2) → <code>write_file</code>/<code>run_bash</code>(M3) → <code>update_plan</code>(M5) → <strong><code>search_docs</code>(M6)</strong> — <strong>루프는 그대로, 도구만 쌓였다.</strong>
+    특히 <code>search_docs</code>는 ReAct에서 <strong>관찰(observation)을 스스로 만들어 오는 도구</strong>다: 모델이 <em>추론</em>(<q>이건 모른다</q>) → <em>행동</em>(<code>search_docs</code> 호출) →
+    <em>관찰</em>(chunk를 <code>tool_result</code>로 받음) → 그 근거로 <em>생성</em>. <strong>RAG가 agent loop에 자연스럽게 맞아 드는 이유</strong>가 이것이다.
+    analogy: 잘 설계된 <strong>플러그인 아키텍처</strong> — 코어(loop)는 고정, 기능은 플러그인(도구)으로. <em>이게 M7(통합)의 전제다.</em>
+  </div>
+
+  <h3>돌려보기 — 대표 질문, 그리고 <strong>grounding</strong></h3>
+  <p>이제 진짜로 돌린다. <strong>반드시 <code>clone-project/</code>에서</strong> 실행해야 <code>KB_DIR="kb"</code>가 보인다. 여기부터는 API 키가 필요하다
+    (<code>export ANTHROPIC_API_KEY=...</code> 또는 <code>cp .env.example .env</code>).</p>
+  <pre><code class="language-bash">cd clone-project
+uv run python -m hermes</code></pre>
+  <p><strong>① 대표 질문 — 모델이 스스로 <code>search_docs</code>를 부른다:</strong></p>
+  <pre class="output">you&gt; Nimbus에서 동시에 배포하는 서버 수 기본값이 몇이야?
+  ↳ step 1: search_docs({'query': 'Nimbus 동시 배포 서버 수 기본값 max_parallel'})
+hermes&gt; Nimbus의 max_parallel 기본값은 4입니다. 값을 지정하지 않으면 서버 4대에 동시에 배포합니다.</pre>
+  <p>모델은 <code>4</code>를 <strong>알 수 없다</strong>(우리가 지어낸 값). 그래서 <code>SYSTEM</code>의 grounding 정책을 따라 <strong>스스로 <code>search_docs</code>를 호출</strong>했고
+    (<code>search_docs</code>는 <code>DANGEROUS_TOOLS</code>가 아니라 <strong>승인 요청 없이 바로</strong> 실행됐다), 찾아온 <code>max_parallel</code> chunk를 근거로 <strong>정확히 <q>4</q></strong>라고 답했다.</p>
+
+  <p><strong>② ★ grounding — <code>kb/</code>에 <em>없는</em> 것을 물으면 <q>모른다</q>고 한다(이 대비가 클라이맥스):</strong></p>
+  <pre class="output">you&gt; Nimbus 로그 파일은 어디에 쌓여?
+  ↳ step 1: search_docs({'query': 'Nimbus 로그 파일 위치 경로'})
+hermes&gt; 검색된 문서에는 로그 파일 위치에 대한 내용이 없습니다. nimbus.toml 설정과 배포 명령은 있지만, 로그 경로는 문서에 없어요.
+you&gt; exit
+bye.</pre>
+  <div class="callout why">
+    <strong>방금 무슨 일이 있었나:</strong> <q>로그 파일 위치</q>는 <code>kb/</code> 어디에도 없다. <code>search_docs</code>는 <code>Nimbus</code> 관련 chunk 몇 개를 물어왔지만
+    <strong>로그 얘기는 그중에 없다</strong> → 모델이 그걸 읽고 <strong>지어내지 않고 <q>문서에 없다</q>고 답</strong>했다. 이게 <strong>grounding</strong>이다 —
+    <q>문서에 근거해 답하고, 없으면 모른다</q>. <strong>검색 없이 물었다면 그럴듯한 로그 경로를 지어냈을</strong> 것이다(hallucination).
+    (모델이 고르는 <code>query</code> 문구·답변 표현은 매번 조금씩 다르다 — 위 출력은 예시다.)
+  </div>
+
+  <div class="callout warn">
+    <strong>막히면:</strong>
+    <strong>★ <code>tool_result content must be a string</code> 400</strong> — <code>search_docs</code>가 <strong>리스트</strong>(<code>rag.search</code>의 <code>list[str]</code>)를 그대로 반환했다.
+    <code>"\n\n---\n\n".join(hits)</code>로 <strong>문자열화</strong>한다(<em>M3 실습에서 겪은 그 400</em>).
+    <strong>검색이 항상 비어 있음 / <code>(관련 문서 없음)</code>만 나옴</strong> — ① <code>uv run python -m hermes</code>를 <strong><code>clone-project/</code>에서</strong> 실행했나
+    (<code>KB_DIR="kb"</code>는 <code>cwd</code> 기준). ② <code>kb/</code>에 <code>.md</code> 파일이 있나. ③ <code>build</code>가 <code>*.md</code>만 읽으니 확장자 확인.
+    <strong><code>ZeroDivisionError</code></strong> — query가 어떤 chunk와도 안 겹쳐 norm이 0. <code>cosine</code>의 <strong>0-norm 가드</strong>(<code>if na and nb else 0.0</code>)가 빠졌다.
+    <strong>모든 단어의 <code>idf</code>가 0이라 검색이 이상함</strong> — 평범한 <code>log(N/df)</code>를 작은 코퍼스에 썼다. <strong>smoothed idf</strong>(<code>log((N+1)/(df+1))+1</code>)로.
+    <strong>동의어로 물으니 못 찾음</strong>(예: <q>한꺼번에 올리는 머신</q>) — <strong>버그가 아니다.</strong> TF-IDF는 <strong>어휘</strong> 유사도라
+    <q>동시에</q>≠<q>한꺼번에</q>는 서로 다른 차원이다(설계). 겹치는 단어로 묻거나, (프로덕션) 신경망 embedding으로 <code>embed</code>를 교체.
+    <strong>모델이 검색 안 하고 지어냄</strong> — <code>SYSTEM</code>의 grounding 문단이 빠졌거나 질문이 검색을 유발 안 함. <strong>이건 <q>부탁</q>이라 100%는 아니다</strong>(강제는 코드).
+    <strong><code>client.embeddings…</code>가 없다며 에러</strong> — 그런 API는 <strong>존재하지 않는다</strong>(설계 ①). 임베딩은 <code>rag.py</code>의 TF-IDF가 전부다.
+    <strong><code>ModuleNotFoundError: rag</code></strong> — <code>tools.py</code>에 <code>from . import rag</code>를 넣었나. <code>rag.py</code>는 <code>config</code>만 import(순환 없음).
+    그래도 막히면 <code>diff hermes/rag.py _solution/06-rag-knowledge/hermes/rag.py</code>로 정답과 대조한다.
+  </div>
+
+  <div class="callout note">
+    <strong>지금 Hermes의 한계 = 다음 모듈의 동기:</strong>
+    ① 검색은 <strong>어휘 기반</strong>(TF-IDF)이라 <strong>동의어에 약하다</strong> — <q>동시에</q>로는 찾고 <q>한꺼번에</q>로는 놓친다.
+    프로덕션은 의미를 잡는 <strong>신경망 embedding</strong>을 쓴다(<code>embed</code> 한 함수만 교체 — 포인터).
+    ② 검색이 <strong>맞는 chunk를 물어왔는지 <em>측정</em></strong>하지 못한다 — 눈으로만 본다 → <strong>M7 eval 예고.</strong>
+    ③ 무슨 도구를 언제·왜 불렀는지 <strong><code>print</code>로 흘려볼 뿐 남지 않는다</strong> → <strong>M7 trace 예고.</strong>
+    ④ 이제 Hermes는 <strong>코딩(M2~M4)·자율(M5)·RAG(M6) 세 성격을 다 가졌다</strong> → <strong>M7에서 한 데모로 통합.</strong>
+  </div>
+
+  <p><strong>RAG 에이전트 요소 완성.</strong> Hermes는 이제 <strong>모르는 걸 물으면 문서를 검색해</strong>(<code>rag.py</code>의 TF-IDF·cosine top-k),
+    <strong>모델이 스스로 <code>search_docs</code>를 불러</strong>(agent loop <strong>무변경</strong>) 찾은 근거로 답하고,
+    <strong>문서에 없으면 지어내지 않고 <q>모른다</q>고 말한다</strong>(grounding). 큰 능력을 붙였는데 <strong><code>agent.py</code>는 한 줄도 안 바뀌었다</strong> —
+    다음 <strong>M7 · 통합 + 관찰(Capstone)</strong>에서는 이 세 성격을 <strong>한 데모로 통합</strong>하고, 실행 <strong>trace 로깅</strong>과 작은 <strong>eval</strong>을 더한다.</p>
+</section>
+
+        <!-- ========== 이번 모듈 질문 (qa-log 자동 렌더) ========== -->
+        <section class="module-section" id="questions">
+          <h2>이번 모듈 질문</h2>
+          <div id="moduleQa" class="qa-list"><p class="hint">학습 중 궁금한 점을 물어보면 여기에 기록됩니다.</p></div>
+        </section>
+
+        <nav class="module-nav">
+          <a class="prev" href="05-planning-autonomy.html">← 5. Planning &amp; Autonomy</a>
+          <a class="next" href="../index.html">다음: 7. Hermes 완성 (Capstone) →</a>
+        </nav>
+      </article>
+    </main>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../assets/app.js"></script>
+</body>
+</html>

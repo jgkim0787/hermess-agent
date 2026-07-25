@@ -70,8 +70,8 @@
       "title": "RAG & Knowledge",
       "summary": "embedding, vector search, retrieval을 도구로 노출",
       "flavor": "RAG",
-      "status": "planned",
-      "terms": ["RAG", "embedding", "vector search", "retrieval"],
+      "status": "done",
+      "terms": ["RAG", "chunk", "embedding", "vector search", "retrieval"],
       "running_example": "로컬 문서 검색 후 답변하는 search_docs"
     },
     {
