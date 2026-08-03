@@ -80,7 +80,7 @@
       "title": "Hermes 완성 (Capstone)",
       "summary": "세 flavor 통합, 데모, eval·관찰(로깅) 맛보기, 다음 단계 포인터",
       "flavor": "통합",
-      "status": "planned",
+      "status": "done",
       "terms": ["eval", "observability", "trace"],
       "running_example": "코드 읽기 + 계획 + 문서 검색 + 결과 작성 복합 데모"
     }
